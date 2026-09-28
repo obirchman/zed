@@ -6957,6 +6957,24 @@ impl GitPanel {
                                 .on_click(|_, window, cx| {
                                     window.dispatch_action(crate::git_graph::Open.boxed_clone(), cx)
                                 }),
+                        )
+                        .child(
+                            Button::new("review-pull-request", "Review PR")
+                                .label_size(LabelSize::Small)
+                                .start_icon(Icon::new(IconName::PullRequest).size(IconSize::Small))
+                                .tooltip(|_window, cx| {
+                                    Tooltip::for_action(
+                                        "Review one of this repository's open Bitbucket pull requests",
+                                        &crate::pr_review::OpenPullRequest,
+                                        cx,
+                                    )
+                                })
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(
+                                        crate::pr_review::OpenPullRequest.boxed_clone(),
+                                        cx,
+                                    )
+                                }),
                         ),
                 ),
         )

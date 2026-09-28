@@ -333,6 +333,14 @@ impl Render for CommitTooltip {
         let message_max_height = window.line_height() * 12 + (ui_font_size / 0.4);
         let repo = self.repository.clone();
         let workspace = self.workspace.clone();
+        let bitbucket_review = {
+            let repo = self.repository.read(cx);
+            repo.remote_origin_url
+                .as_deref()
+                .or(repo.remote_upstream_url.as_deref())
+                .and_then(bitbucket::BitbucketStore::repo_for_remote)
+                .map(|repo_ref| (repo_ref, repo.work_directory_abs_path.to_path_buf()))
+        };
         let commit_summary = CommitSummary {
             sha: self.commit.sha.clone(),
             subject: self
@@ -424,9 +432,28 @@ impl Render for CommitTooltip {
                                                         .size(IconSize::Small)
                                                         .color(Color::Muted),
                                                 )
-                                                .on_click(move |_, _, cx| {
-                                                    cx.stop_propagation();
-                                                    cx.open_url(pr.url.as_str())
+                                                .on_click({
+                                                    let bitbucket = bitbucket_review.clone();
+                                                    let workspace = workspace.clone();
+                                                    move |_, window, cx| {
+                                                        cx.stop_propagation();
+                                                        // A Bitbucket pull request opens as a review in Zed.
+                                                        if let Some((repo, root)) = bitbucket.clone() {
+                                                            let key = bitbucket::PrKey {
+                                                                repo,
+                                                                id: pr.number as u64,
+                                                            };
+                                                            workspace
+                                                                .update(cx, |workspace, cx| {
+                                                                    crate::pr_review::PrReview::open(
+                                                                        workspace, key, root, window, cx,
+                                                                    )
+                                                                })
+                                                                .ok();
+                                                        } else {
+                                                            cx.open_url(pr.url.as_str())
+                                                        }
+                                                    }
                                                 }),
                                             )
                                             .child(Divider::vertical())
