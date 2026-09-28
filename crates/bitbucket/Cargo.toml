@@ -21,3 +21,7 @@ gpui.workspace = true
 http_client.workspace = true
 log.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+http_client = { workspace = true, features = ["test-support"] }

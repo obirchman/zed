@@ -1,5 +1,5 @@
 use anyhow::{Context as _, Result, anyhow};
-use bbt::config::{self, Profile};
+use bbt::config::{self, Auth, Profile};
 use bbt::models::{self, Account, BuildStatus, Comment, DiffstatEntry, Pipeline, PullRequest, Step};
 use bbt::read::ReadClient;
 use bbt::repo::RepoRef;
@@ -78,8 +78,8 @@ impl BitbucketStore {
         cx.try_global::<GlobalBitbucketStore>().map(|g| g.0.clone())
     }
 
-    fn new(cx: &mut Context<Self>) -> Self {
-        let mut this = Self {
+    fn empty() -> Self {
+        Self {
             read: None,
             write: None,
             config_error: None,
@@ -89,9 +89,45 @@ impl BitbucketStore {
             steps: HashMap::default(),
             fetching: HashSet::default(),
             _load_user: None,
-        };
+        }
+    }
+
+    fn new(cx: &mut Context<Self>) -> Self {
+        let mut this = Self::empty();
         this.reload_credentials(cx);
         this
+    }
+
+    /// A store whose clients send through `http` with the given credentials,
+    /// instead of Zed's HTTP client and bbt's credentials file.
+    pub fn with_http(
+        http: Arc<dyn bbt::transport::Http>,
+        read: Option<Auth>,
+        write: Option<Auth>,
+        base: String,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self::empty();
+        this.set_clients(http, read, write, base, cx);
+        this
+    }
+
+    fn set_clients(
+        &mut self,
+        http: Arc<dyn bbt::transport::Http>,
+        read: Option<Auth>,
+        write: Option<Auth>,
+        base: String,
+        cx: &mut Context<Self>,
+    ) {
+        let lookup = read.or_else(|| write.clone());
+        self.read = lookup.map(|auth| Arc::new(ReadClient::with_http(http.clone(), auth, base.clone())));
+        self.write = write.map(|auth| Arc::new(WriteClient::with_http(http, auth, base)));
+        self.config_error = self
+            .read
+            .is_none()
+            .then(|| config::missing_credential(Profile::Read).to_string());
+        self.load_user(cx);
     }
 
     /// Build the clients from bbt's credentials (`bbt auth set read|write`).
@@ -107,13 +143,7 @@ impl BitbucketStore {
         });
         match loaded {
             Ok((read, write)) => {
-                let lookup = read.map(|c| c.auth).or_else(|| write.as_ref().map(|c| c.auth.clone()));
-                self.read = lookup.map(|auth| Arc::new(ReadClient::with_http(http.clone(), auth, base.clone())));
-                self.write = write.map(|c| Arc::new(WriteClient::with_http(http.clone(), c.auth, base.clone())));
-                self.config_error = self
-                    .read
-                    .is_none()
-                    .then(|| config::missing_credential(Profile::Read).to_string());
+                self.set_clients(http, read.map(|c| c.auth), write.map(|c| c.auth), base, cx);
             }
             Err(e) => {
                 self.read = None;
@@ -121,7 +151,6 @@ impl BitbucketStore {
                 self.config_error = Some(e.to_string());
             }
         }
-        self.load_user(cx);
     }
 
     fn load_user(&mut self, cx: &mut Context<Self>) {
@@ -320,5 +349,88 @@ impl BitbucketStore {
             }
             Ok(response)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ZedHttp;
+    use gpui::TestAppContext;
+    use http_client::{AsyncBody, FakeHttpClient, Response};
+    use serde_json::json;
+
+    fn listing(values: Value) -> Value {
+        json!({ "values": values })
+    }
+
+    #[gpui::test]
+    async fn refresh_decodes_pull_request_comments_statuses_and_diffstat(cx: &mut TestAppContext) {
+        let client = FakeHttpClient::create(|req| async move {
+            let body = match req.uri().path() {
+                "/2.0/user" => json!({ "display_name": "Me", "uuid": "{me}" }),
+                "/2.0/repositories/ws/repo/pullrequests/7" => json!({
+                    "id": 7, "title": "Fix reset", "state": "OPEN",
+                    "source": { "branch": { "name": "bugfix/reset" }, "commit": { "hash": "aaaaaaaaaaaa" } },
+                    "destination": { "branch": { "name": "main" }, "commit": { "hash": "bbbbbbbbbbbb" } },
+                    "participants": [{ "user": { "display_name": "Me", "uuid": "{me}" }, "role": "REVIEWER", "approved": true, "state": "approved" }]
+                }),
+                "/2.0/repositories/ws/repo/pullrequests/7/comments" => listing(json!([
+                    { "id": 1, "content": { "raw": "why?" }, "inline": { "path": "src/a.c", "to": 12 } },
+                    { "id": 2, "content": { "raw": "because" }, "parent": { "id": 1 } }
+                ])),
+                "/2.0/repositories/ws/repo/pullrequests/7/statuses" => listing(json!([{ "key": "build", "state": "FAILED" }])),
+                "/2.0/repositories/ws/repo/pullrequests/7/diffstat" => listing(json!([
+                    { "status": "modified", "lines_added": 3, "lines_removed": 1, "new": { "path": "src/a.c" } }
+                ])),
+                _ => return Ok(Response::builder().status(404).body(AsyncBody::empty())?),
+            };
+            Ok(Response::builder().status(200).body(AsyncBody::from(body.to_string()))?)
+        });
+        let store = cx.new(|cx| {
+            let http = Arc::new(ZedHttp::new(client, cx.background_executor().clone()));
+            let auth = Auth::Basic {
+                email: "me@example.com".into(),
+                token: "t".into(),
+            };
+            BitbucketStore::with_http(http, Some(auth), None, "http://test.example/2.0".into(), cx)
+        });
+        let key = PrKey {
+            repo: RepoRef::new("ws", "repo"),
+            id: 7,
+        };
+        store.update(cx, |store, cx| store.refresh_pull_request(key.clone(), cx));
+        cx.run_until_parked();
+
+        store.read_with(cx, |store, _| {
+            assert_eq!(store.me().map(|me| me.display_name.as_str()), Some("Me"));
+            assert!(!store.can_write());
+            let data = store.pull_request(&key).expect("pull request fetched");
+            assert_eq!(data.error, None);
+            assert!(!data.loading);
+            let pr = data.pull_request.as_ref().unwrap();
+            assert_eq!(pr.source.commit.as_ref().unwrap().hash, "aaaaaaaaaaaa");
+            assert!(pr.participants[0].approved);
+            assert_eq!(data.comments.len(), 2);
+            assert_eq!(data.comments[0].inline.as_ref().unwrap().to, Some(12));
+            assert_eq!(data.statuses[0].state, "FAILED");
+            assert_eq!(data.diffstat[0].lines_added, 3);
+        });
+    }
+
+    #[gpui::test]
+    async fn writes_without_a_write_credential_fail_before_sending(cx: &mut TestAppContext) {
+        let client = FakeHttpClient::create(|req| async move {
+            assert_eq!(req.method(), "GET", "no write may reach the network");
+            Ok(Response::builder().status(200).body(AsyncBody::from("{}".to_string()))?)
+        });
+        let store = cx.new(|cx| {
+            let http = Arc::new(ZedHttp::new(client, cx.background_executor().clone()));
+            let auth = Auth::Bearer { token: "t".into() };
+            BitbucketStore::with_http(http, Some(auth), None, "http://test.example/2.0".into(), cx)
+        });
+        let request = bbt::write::plan::approve(&RepoRef::new("ws", "repo"), 7, true);
+        let result = store.update(cx, |store, cx| store.execute(request, None, cx)).await;
+        assert!(result.unwrap_err().to_string().contains("write credential"));
     }
 }
