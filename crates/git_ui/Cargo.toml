@@ -18,6 +18,7 @@ test-support = ["multi_buffer/test-support", "remote_connection/test-support"]
 call = ["dep:call"]
 
 [dependencies]
+bitbucket.workspace = true
 agent_settings.workspace = true
 anyhow.workspace = true
 askpass.workspace = true
@@ -44,6 +45,7 @@ markdown.workspace = true
 menu.workspace = true
 multi_buffer.workspace = true
 notifications.workspace = true
+paths.workspace = true
 picker.workspace = true
 project.workspace = true
 prompt_store.workspace = true

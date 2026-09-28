@@ -2893,6 +2893,36 @@ impl Editor {
     }
 }
 
+impl Editor {
+    /// Takes every review comment entered through the diff review overlay, as
+    /// (file path, 0-based row of the last reviewed line in that file, text),
+    /// and clears them, for callers that send comments somewhere other than
+    /// the agent panel.
+    pub fn take_review_comments_by_line(&mut self, cx: &mut Context<Self>) -> Vec<(Arc<util::rel_path::RelPath>, u32, String)> {
+        self.dismiss_all_diff_review_overlays(cx);
+        let stored = std::mem::take(&mut self.stored_review_comments);
+        self.next_review_comment_id = 0;
+        let snapshot = self.buffer.read(cx).snapshot(cx);
+        let taken = stored
+            .into_iter()
+            .flat_map(|(key, comments)| {
+                let snapshot = &snapshot;
+                comments.into_iter().map(move |c| {
+                    let end = c.range.end.to_point(snapshot);
+                    let row = snapshot
+                        .point_to_buffer_point(end)
+                        .map(|(_, p)| p.row)
+                        .unwrap_or(end.row);
+                    (key.file_path.clone(), row, c.comment)
+                })
+            })
+            .collect();
+        cx.emit(EditorEvent::ReviewCommentsChanged { total_count: 0 });
+        cx.notify();
+        taken
+    }
+}
+
 #[cfg(test)]
 impl Editor {
     /// Returns the line range for the first diff review overlay, if one is active.
