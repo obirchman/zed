@@ -1,4 +1,4 @@
-use bbt::transport::{Http, HttpFailure, HttpRequest, HttpResponse};
+use crate::api::{Http, HttpFailure, HttpRequest, HttpResponse};
 use futures::AsyncReadExt as _;
 use futures::future::BoxFuture;
 use gpui::BackgroundExecutor;
@@ -6,7 +6,7 @@ use http_client::{AsyncBody, HttpClient, Request};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// `bbt`'s HTTP stack implemented over Zed's HTTP client and background timer.
+/// The Bitbucket client's HTTP stack, on Zed's HTTP client and background timer.
 pub struct ZedHttp {
     client: Arc<dyn HttpClient>,
     executor: BackgroundExecutor,
@@ -34,7 +34,7 @@ impl Http for ZedHttp {
             let failure = |e: anyhow::Error| HttpFailure {
                 message: format!("{e:#}"),
                 // Zed's client does not say whether the server saw the request;
-                // bbt only retries such a failure for a GET.
+                // the client only retries such a failure for a GET.
                 connect_or_timeout: true,
             };
             let request = request.map_err(|e| failure(e.into()))?;

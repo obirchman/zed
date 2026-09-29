@@ -1,15 +1,15 @@
+use crate::api::{Auth, Client, DEFAULT_API_BASE, Http, WriteRequest};
+use crate::models::{self, Account, BuildStatus, Comment, DiffstatEntry, Pipeline, PullRequest, Step};
+use crate::repo::RepoRef;
+use crate::ZedHttp;
 use anyhow::{Context as _, Result, anyhow};
-use bbt::config::{self, Auth, Profile};
-use bbt::models::{self, Account, BuildStatus, Comment, DiffstatEntry, Pipeline, PullRequest, Step};
-use bbt::read::ReadClient;
-use bbt::repo::RepoRef;
-use bbt::write::{WriteClient, WriteRequest};
 use collections::{HashMap, HashSet};
-use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, Task};
+use gpui::{App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Global, Task};
 use serde_json::Value;
 use std::sync::Arc;
 
-use crate::ZedHttp;
+/// The key the credential is stored under in Zed's credentials store.
+const CREDENTIAL_URL: &str = "https://api.bitbucket.org";
 
 /// One pull request: repository plus id.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -42,7 +42,16 @@ pub enum StoreEvent {
     PrUpdated(PrKey),
     PipelinesUpdated(PipelineKey),
     StepsUpdated { repo: RepoRef, pipeline_uuid: String },
-    UserUpdated,
+    /// Connected, disconnected, or the account was loaded.
+    ConnectionChanged,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Connection {
+    /// Reading the stored credential.
+    Loading,
+    Disconnected,
+    Connected,
 }
 
 struct GlobalBitbucketStore(Entity<BitbucketStore>);
@@ -50,16 +59,18 @@ struct GlobalBitbucketStore(Entity<BitbucketStore>);
 impl Global for GlobalBitbucketStore {}
 
 pub struct BitbucketStore {
-    read: Option<Arc<ReadClient>>,
-    write: Option<Arc<WriteClient>>,
-    /// Why there is no read client (missing or invalid bbt credentials).
-    config_error: Option<String>,
+    http: Arc<dyn Http>,
+    base: String,
+    client: Option<Arc<Client>>,
+    connection: Connection,
+    /// Why the last connection attempt or credential read failed.
+    connection_error: Option<String>,
     me: Option<Account>,
     pull_requests: HashMap<PrKey, PrData>,
     pipelines: HashMap<PipelineKey, Vec<Pipeline>>,
     steps: HashMap<(RepoRef, String), Vec<Step>>,
     fetching: HashSet<PrKey>,
-    _load_user: Option<Task<()>>,
+    _load: Option<Task<()>>,
 }
 
 impl EventEmitter<StoreEvent> for BitbucketStore {}
@@ -83,106 +94,127 @@ impl BitbucketStore {
         cx.try_global::<GlobalBitbucketStore>().map(|g| g.0.clone())
     }
 
-    fn empty() -> Self {
+    fn empty(http: Arc<dyn Http>, base: String) -> Self {
         Self {
-            read: None,
-            write: None,
-            config_error: None,
+            http,
+            base,
+            client: None,
+            connection: Connection::Loading,
+            connection_error: None,
             me: None,
             pull_requests: HashMap::default(),
             pipelines: HashMap::default(),
             steps: HashMap::default(),
             fetching: HashSet::default(),
-            _load_user: None,
+            _load: None,
         }
     }
 
+    /// A store on Zed's HTTP client, connected with the credential saved in
+    /// Zed's credentials store, if there is one.
     fn new(cx: &mut Context<Self>) -> Self {
-        let mut this = Self::empty();
-        this.reload_credentials(cx);
+        let http: Arc<dyn Http> = Arc::new(ZedHttp::new(cx.http_client(), cx.background_executor().clone()));
+        let mut this = Self::empty(http, DEFAULT_API_BASE.to_string());
+        let provider = zed_credentials_provider::global(cx);
+        this._load = Some(cx.spawn(async move |this, cx| {
+            let stored = provider.read_credentials(CREDENTIAL_URL, cx).await;
+            this.update(cx, |this, cx| match stored {
+                Ok(Some((email, token))) => {
+                    let token = String::from_utf8_lossy(&token).to_string();
+                    this.set_client(Some(Auth::new(&email, &token)), cx);
+                }
+                Ok(None) => this.set_client(None, cx),
+                Err(e) => {
+                    this.connection_error = Some(format!("reading the saved Bitbucket credential: {e:#}"));
+                    this.set_client(None, cx);
+                }
+            })
+            .ok();
+        }));
         this
     }
 
-    /// A store whose clients send through `http` with the given credentials,
-    /// instead of Zed's HTTP client and bbt's credentials file.
-    pub fn with_http(
-        http: Arc<dyn bbt::transport::Http>,
-        read: Option<Auth>,
-        write: Option<Auth>,
-        base: String,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let mut this = Self::empty();
-        this.set_clients(http, read, write, base, cx);
+    /// A store whose client sends through `http` with `auth`, instead of
+    /// Zed's HTTP client and credentials store.
+    pub fn with_http(http: Arc<dyn Http>, auth: Option<Auth>, base: String, cx: &mut Context<Self>) -> Self {
+        let mut this = Self::empty(http, base);
+        this.set_client(auth, cx);
         this
     }
 
-    fn set_clients(
-        &mut self,
-        http: Arc<dyn bbt::transport::Http>,
-        read: Option<Auth>,
-        write: Option<Auth>,
-        base: String,
-        cx: &mut Context<Self>,
-    ) {
-        let lookup = read.or_else(|| write.clone());
-        self.read = lookup.map(|auth| Arc::new(ReadClient::with_http(http.clone(), auth, base.clone())));
-        self.write = write.map(|auth| Arc::new(WriteClient::with_http(http, auth, base)));
-        self.config_error = self
-            .read
-            .is_none()
-            .then(|| config::missing_credential(Profile::Read).to_string());
+    fn set_client(&mut self, auth: Option<Auth>, cx: &mut Context<Self>) {
+        self.client = auth.map(|auth| Arc::new(Client::new(self.http.clone(), auth, self.base.clone())));
+        self.connection = if self.client.is_some() {
+            Connection::Connected
+        } else {
+            Connection::Disconnected
+        };
+        self.me = None;
         self.load_user(cx);
-    }
-
-    /// Build the clients from bbt's credentials (`bbt auth set read|write`).
-    /// Lookups use the read credential, else the write credential.
-    pub fn reload_credentials(&mut self, cx: &mut Context<Self>) {
-        let http: Arc<dyn bbt::transport::Http> =
-            Arc::new(ZedHttp::new(cx.http_client(), cx.background_executor().clone()));
-        let base = bbt::transport::api_base();
-        let loaded = config::config_dir().and_then(|dir| {
-            let read = config::load_credential(&dir, Profile::Read)?;
-            let write = config::load_credential(&dir, Profile::Write)?;
-            Ok((read, write))
-        });
-        match loaded {
-            Ok((read, write)) => {
-                self.set_clients(http, read.map(|c| c.auth), write.map(|c| c.auth), base, cx);
-            }
-            Err(e) => {
-                self.read = None;
-                self.write = None;
-                self.config_error = Some(e.to_string());
-            }
-        }
+        cx.emit(StoreEvent::ConnectionChanged);
+        cx.notify();
     }
 
     fn load_user(&mut self, cx: &mut Context<Self>) {
-        let Some(read) = self.read.clone() else {
+        let Some(client) = self.client.clone() else {
             return;
         };
-        let fetch = cx.background_spawn(async move { read.current_user().await });
-        self._load_user = Some(cx.spawn(async move |this, cx| {
+        let fetch = cx.background_spawn(async move { client.current_user().await });
+        self._load = Some(cx.spawn(async move |this, cx| {
             let result = fetch.await.and_then(models::decode::<Account>);
             this.update(cx, |this, cx| match result {
                 Ok(me) => {
                     this.me = Some(me);
-                    cx.emit(StoreEvent::UserUpdated);
+                    this.connection_error = None;
+                    cx.emit(StoreEvent::ConnectionChanged);
                     cx.notify();
                 }
-                Err(e) => log::warn!("bitbucket: could not load the current user: {e:#}"),
+                Err(e) => {
+                    this.connection_error = Some(format!("{e:#}"));
+                    cx.notify();
+                }
             })
             .ok();
         }));
     }
 
-    pub fn config_error(&self) -> Option<&str> {
-        self.config_error.as_deref()
+    /// Check `email` and `token` against Bitbucket, then save them in Zed's
+    /// credentials store and use them. An empty email means an access token
+    /// (Bearer); otherwise an Atlassian API token with its account email.
+    pub fn connect(&mut self, email: String, token: String, cx: &mut Context<Self>) -> Task<Result<()>> {
+        let auth = Auth::new(&email, &token);
+        let client = Client::new(self.http.clone(), auth.clone(), self.base.clone());
+        let check = cx.background_spawn(async move { client.current_user().await });
+        let provider = zed_credentials_provider::global(cx);
+        cx.spawn(async move |this, cx| {
+            let me: Account = models::decode(check.await.context("Bitbucket rejected the credential")?)?;
+            save_credential(provider.as_ref(), &email, &token, cx).await?;
+            this.update(cx, |this, cx| {
+                this.set_client(Some(auth), cx);
+                this.me = Some(me);
+            })
+        })
     }
 
-    pub fn can_write(&self) -> bool {
-        self.write.is_some()
+    /// Forget the saved credential.
+    pub fn disconnect(&mut self, cx: &mut Context<Self>) -> Task<Result<()>> {
+        let provider = zed_credentials_provider::global(cx);
+        cx.spawn(async move |this, cx| {
+            provider.delete_credentials(CREDENTIAL_URL, cx).await?;
+            this.update(cx, |this, cx| this.set_client(None, cx))
+        })
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.connection == Connection::Connected
+    }
+
+    pub fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
+    pub fn connection_error(&self) -> Option<&str> {
+        self.connection_error.as_deref()
     }
 
     /// The account the credential belongs to, once loaded.
@@ -190,32 +222,27 @@ impl BitbucketStore {
         self.me.as_ref()
     }
 
-    pub(crate) fn read_client(&self) -> Result<Arc<ReadClient>> {
-        self.read
+    pub(crate) fn client(&self) -> Result<Arc<Client>> {
+        self.client
             .clone()
-            .ok_or_else(|| anyhow!(self.config_error.clone().unwrap_or_else(|| "no Bitbucket credential".into())))
+            .ok_or_else(|| anyhow!("Not connected to Bitbucket: use Connect in the Pull requests panel"))
     }
 
     /// The Bitbucket repository a git remote URL points to.
     pub fn repo_for_remote(url: &str) -> Option<RepoRef> {
-        bbt::repo::parse_remote_url(url)
+        crate::repo::parse_remote_url(url)
     }
 
     /// Open pull requests of `repo`, newest update first. Not cached: a picker
     /// asks once per opening.
     pub fn open_pull_requests(&self, repo: RepoRef, cx: &mut Context<Self>) -> Task<Result<Vec<PullRequest>>> {
-        let read = match self.read_client() {
+        let read = match self.client() {
             Ok(read) => read,
             Err(e) => return Task::ready(Err(e)),
         };
         cx.background_spawn(async move {
-            // The list endpoint leaves out participants unless asked for.
-            let path = format!(
-                "{}/pullrequests?pagelen=50&sort=-updated_on&state=OPEN&fields=%2Bvalues.participants,%2Bvalues.reviewers",
-                bbt::read::repo_path(&repo)
-            );
-            let rows = read.get_all(&path, Some(100)).await?;
-            Ok(models::decode(Value::Array(rows))?)
+            let rows = read.open_pull_requests(&repo, Some(100)).await?;
+            models::decode(Value::Array(rows))
         })
     }
 
@@ -227,7 +254,7 @@ impl BitbucketStore {
     /// emit `PrUpdated` when they arrive. A fetch already running for `key` is
     /// not started twice.
     pub fn refresh_pull_request(&mut self, key: PrKey, cx: &mut Context<Self>) {
-        let read = match self.read_client() {
+        let read = match self.client() {
             Ok(read) => read,
             Err(e) => {
                 self.pull_requests.entry(key.clone()).or_default().error = Some(format!("{e:#}"));
@@ -284,7 +311,7 @@ impl BitbucketStore {
     }
 
     pub fn refresh_pipelines(&mut self, key: PipelineKey, cx: &mut Context<Self>) -> Task<Result<()>> {
-        let read = match self.read_client() {
+        let read = match self.client() {
             Ok(read) => read,
             Err(e) => return Task::ready(Err(e)),
         };
@@ -310,7 +337,7 @@ impl BitbucketStore {
     }
 
     pub fn refresh_steps(&mut self, repo: RepoRef, pipeline_uuid: String, cx: &mut Context<Self>) -> Task<Result<()>> {
-        let read = match self.read_client() {
+        let read = match self.client() {
             Ok(read) => read,
             Err(e) => return Task::ready(Err(e)),
         };
@@ -331,22 +358,21 @@ impl BitbucketStore {
 
     /// One step's log text. Not cached: a running step's log grows.
     pub fn step_log(&self, repo: RepoRef, pipeline_uuid: String, step_uuid: String, cx: &mut Context<Self>) -> Task<Result<String>> {
-        let read = match self.read_client() {
+        let read = match self.client() {
             Ok(read) => read,
             Err(e) => return Task::ready(Err(e)),
         };
         cx.background_spawn(async move { Ok(read.step_log(&repo, &pipeline_uuid, &step_uuid).await?) })
     }
 
-    /// Send a write planned by `bbt::write::plan`, then refetch the pull
-    /// request it changed, if any.
+    /// Send a write planned by `api::plan`, then refetch the pull request it
+    /// changed, if any.
     pub fn execute(&mut self, request: WriteRequest, refresh: Option<PrKey>, cx: &mut Context<Self>) -> Task<Result<Value>> {
-        let Some(write) = self.write.clone() else {
-            return Task::ready(Err(anyhow!(
-                "no Bitbucket write credential: run `bbt auth set write`"
-            )));
+        let client = match self.client() {
+            Ok(client) => client,
+            Err(e) => return Task::ready(Err(e)),
         };
-        let send = cx.background_spawn(async move { write.execute(&request).await });
+        let send = cx.background_spawn(async move { client.execute(&request).await });
         cx.spawn(async move |this, cx| {
             let response = send.await.context("Bitbucket write failed")?;
             if let Some(key) = refresh {
@@ -355,6 +381,18 @@ impl BitbucketStore {
             Ok(response)
         })
     }
+}
+
+async fn save_credential(
+    provider: &dyn credentials_provider::CredentialsProvider,
+    email: &str,
+    token: &str,
+    cx: &AsyncApp,
+) -> Result<()> {
+    provider
+        .write_credentials(CREDENTIAL_URL, email.trim(), token.as_bytes(), cx)
+        .await
+        .context("saving the Bitbucket credential")
 }
 
 #[cfg(test)]
@@ -398,7 +436,7 @@ mod tests {
                 email: "me@example.com".into(),
                 token: "t".into(),
             };
-            BitbucketStore::with_http(http, Some(auth), None, "http://test.example/2.0".into(), cx)
+            BitbucketStore::with_http(http, Some(auth), "http://test.example/2.0".into(), cx)
         });
         let key = PrKey {
             repo: RepoRef::new("ws", "repo"),
@@ -409,7 +447,6 @@ mod tests {
 
         store.read_with(cx, |store, _| {
             assert_eq!(store.me().map(|me| me.display_name.as_str()), Some("Me"));
-            assert!(!store.can_write());
             let data = store.pull_request(&key).expect("pull request fetched");
             assert_eq!(data.error, None);
             assert!(!data.loading);
@@ -424,18 +461,34 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn writes_without_a_write_credential_fail_before_sending(cx: &mut TestAppContext) {
-        let client = FakeHttpClient::create(|req| async move {
-            assert_eq!(req.method(), "GET", "no write may reach the network");
-            Ok(Response::builder().status(200).body(AsyncBody::from("{}".to_string()))?)
+    async fn writes_use_the_one_credential_and_a_disconnected_store_sends_nothing(cx: &mut TestAppContext) {
+        let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+        let client = FakeHttpClient::create(move |req| {
+            let recorded = recorded.clone();
+            async move {
+                let auth = req.headers().get("authorization").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
+                recorded.lock().push((req.method().to_string(), req.uri().path().to_string(), auth));
+                Ok(Response::builder().status(200).body(AsyncBody::from("{}".to_string()))?)
+            }
         });
-        let store = cx.new(|cx| {
-            let http = Arc::new(ZedHttp::new(client, cx.background_executor().clone()));
-            let auth = Auth::Bearer { token: "t".into() };
-            BitbucketStore::with_http(http, Some(auth), None, "http://test.example/2.0".into(), cx)
+        let http: Arc<dyn Http> = cx.update(|cx| Arc::new(ZedHttp::new(client, cx.background_executor().clone())));
+        let connected = cx.new(|cx| {
+            BitbucketStore::with_http(http.clone(), Some(Auth::Bearer { token: "t".into() }), "http://test.example/2.0".into(), cx)
         });
-        let request = bbt::write::plan::approve(&RepoRef::new("ws", "repo"), 7, true);
-        let result = store.update(cx, |store, cx| store.execute(request, None, cx)).await;
-        assert!(result.unwrap_err().to_string().contains("write credential"));
+        let request = crate::api::plan::approve(&RepoRef::new("ws", "repo"), 7, true);
+        connected
+            .update(cx, |store, cx| store.execute(request.clone(), None, cx))
+            .await
+            .unwrap();
+        assert!(seen.lock().iter().any(|(method, path, auth)| method == "POST"
+            && path == "/2.0/repositories/ws/repo/pullrequests/7/approve"
+            && auth == "Bearer t"));
+
+        let disconnected = cx.new(|cx| BitbucketStore::with_http(http, None, "http://test.example/2.0".into(), cx));
+        let count = seen.lock().len();
+        let result = disconnected.update(cx, |store, cx| store.execute(request, None, cx)).await;
+        assert!(result.unwrap_err().to_string().contains("Not connected"));
+        assert_eq!(seen.lock().len(), count);
     }
 }

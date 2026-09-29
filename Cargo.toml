@@ -300,7 +300,6 @@ auto_update_ui = { path = "crates/auto_update_ui" }
 aws_http_client = { path = "crates/aws_http_client" }
 bedrock = { path = "crates/bedrock" }
 breadcrumbs = { path = "crates/breadcrumbs" }
-bbt = { path = "../../lab/bbt", default-features = false }
 bitbucket = { path = "crates/bitbucket" }
 buffer_diff = { path = "crates/buffer_diff" }
 call = { path = "crates/call" }

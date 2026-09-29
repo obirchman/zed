@@ -4,7 +4,7 @@
 use anyhow::Result;
 use bitbucket::{
     BitbucketStore, PipelineKey, RepoRef, StoreEvent,
-    bbt::write::{NewPipeline, plan},
+    api::{NewPipeline, plan},
     models::{Pipeline, Step},
 };
 use collections::HashSet;
@@ -143,7 +143,7 @@ impl PrPipelines {
         cx.notify();
     }
 
-    fn write(&mut self, request: bitbucket::bbt::write::WriteRequest, cx: &mut gpui::Context<Self>) {
+    fn write(&mut self, request: bitbucket::api::WriteRequest, cx: &mut gpui::Context<Self>) {
         let send = self.store.update(cx, |store, cx| store.execute(request, None, cx));
         cx.spawn(async move |this, cx| {
             let result = send.await;
@@ -163,7 +163,6 @@ impl PrPipelines {
                 branch: self.key.branch.clone(),
                 commit: None,
                 custom: None,
-                variables: Vec::new(),
             },
         );
         self.write(request, cx);
@@ -202,7 +201,7 @@ impl PrPipelines {
     }
 
     fn render_pipeline(&self, pipeline: &Pipeline, cx: &mut gpui::Context<Self>) -> gpui::AnyElement {
-        let can_write = self.store.read(cx).can_write();
+        let can_write = self.store.read(cx).is_connected();
         let label = pipeline.state.label().to_string();
         let color = state_color(&label);
         let running = pipeline.state.name != "COMPLETED";
@@ -327,8 +326,8 @@ impl Focusable for PrPipelines {
 impl Render for PrPipelines {
     fn render(&mut self, _window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let pipelines = self.pipelines(cx);
-        let can_write = self.store.read(cx).can_write();
-        let config_error = self.store.read(cx).config_error().map(str::to_string);
+        let can_write = self.store.read(cx).is_connected();
+        let config_error = self.store.read(cx).connection_error().map(str::to_string);
         let rows: Vec<gpui::AnyElement> = pipelines.iter().map(|p| self.render_pipeline(p, cx)).collect();
         let colors = cx.theme().colors();
         v_flex()
@@ -350,7 +349,7 @@ impl Render for PrPipelines {
                         Button::new("run-branch", "Run pipeline on branch")
                             .style(ButtonStyle::Filled)
                             .disabled(!can_write)
-                            .when(!can_write, |b| b.tooltip(Tooltip::text("Needs a Bitbucket write credential: run `bbt auth set write`")))
+                            .when(!can_write, |b| b.tooltip(Tooltip::text("Connect to Bitbucket in the Pull requests panel first")))
                             .on_click(cx.listener(|this, _, _, cx| this.rerun(cx))),
                     )
                     .child(

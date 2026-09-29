@@ -1,6 +1,6 @@
 //! Finding the user's own clone of a Bitbucket repository on disk.
 
-use bbt::repo::RepoRef;
+use crate::repo::RepoRef;
 use std::path::{Path, PathBuf};
 
 /// How many directory levels below each root are searched.
@@ -43,7 +43,7 @@ fn clone_matches(git_dir: &Path, repo: &RepoRef) -> bool {
         .lines()
         .filter_map(|line| line.trim().strip_prefix("url"))
         .filter_map(|rest| rest.trim_start().strip_prefix('='))
-        .filter_map(|url| bbt::repo::parse_remote_url(url.trim()))
+        .filter_map(|url| crate::repo::parse_remote_url(url.trim()))
         .any(|found| found == *repo)
 }
 

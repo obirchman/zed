@@ -2100,20 +2100,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55248b47b0caf0546f7988906588779981c43bb1bc9d0c44087278f80cdb44ba"
 
 [[package]]
-name = "bbt"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "chrono",
- "futures 0.3.34",
- "serde",
- "serde_json",
- "thiserror 2.0.17",
- "tokio",
- "toml 0.8.23",
-]
-
-[[package]]
 name = "bedrock"
 version = "0.1.0"
 dependencies = [
@@ -2272,8 +2258,9 @@ name = "bitbucket"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bbt",
+ "base64 0.22.1",
  "collections",
+ "credentials_provider",
  "db",
  "futures 0.3.34",
  "gpui",
@@ -2281,9 +2268,12 @@ dependencies = [
  "log",
  "parking_lot",
  "paths",
+ "serde",
  "serde_json",
  "settings",
+ "smol",
  "tempfile",
+ "zed_credentials_provider",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
 //! Pull request comments grouped into threads, and where each thread belongs.
 
-use bitbucket::bbt::pulls;
+use bitbucket::reviewer as pulls;
 use bitbucket::models::Comment;
 use collections::HashMap;
 

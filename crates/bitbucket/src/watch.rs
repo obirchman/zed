@@ -9,10 +9,10 @@ use crate::persistence::BitbucketDb;
 use crate::settings::BitbucketSettings;
 use crate::store::{BitbucketStore, PrKey};
 use anyhow::{Context as _, Result};
-use bbt::changes::{self, Change, Snapshot};
-use bbt::models::{self, Account, BuildStatus, Comment, PullRequest};
-use bbt::read::ReadClient;
-use bbt::repo::RepoRef;
+use crate::changes::{self, Change, Snapshot};
+use crate::models::{self, Account, BuildStatus, Comment, PullRequest};
+use crate::api::Client;
+use crate::repo::RepoRef;
 use collections::{HashMap, HashSet};
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, Task, TaskExt as _};
 use serde_json::Value;
@@ -209,7 +209,7 @@ impl PrWatch {
         if self.checking {
             return Task::ready(());
         }
-        let read = match self.store.read(cx).read_client() {
+        let read = match self.store.read(cx).client() {
             Ok(read) => read,
             Err(e) => {
                 self.error = Some(format!("{e:#}"));
@@ -347,7 +347,7 @@ fn key_of(pr: &PullRequest) -> Option<PrKey> {
 /// Comments and statuses are refetched only for a pull request that was
 /// updated since the last check, or whose builds were still running.
 async fn fetch_mine(
-    read: Arc<ReadClient>,
+    read: Arc<Client>,
     me: Option<Account>,
     workspaces: Vec<String>,
     previous: HashMap<PrKey, (Option<String>, Snapshot)>,
@@ -447,7 +447,7 @@ async fn fetch_mine(
 mod tests {
     use super::*;
     use crate::ZedHttp;
-    use bbt::config::Auth;
+    use crate::api::Auth;
     use gpui::{BorrowAppContext as _, TestAppContext};
     use http_client::{AsyncBody, FakeHttpClient, Response};
     use parking_lot::Mutex;
@@ -506,7 +506,7 @@ mod tests {
             let store = cx.new(|cx| {
                 let http = Arc::new(ZedHttp::new(client, cx.background_executor().clone()));
                 let auth = Auth::Bearer { token: "t".into() };
-                BitbucketStore::with_http(http, Some(auth), None, "http://test.example/2.0".into(), cx)
+                BitbucketStore::with_http(http, Some(auth), "http://test.example/2.0".into(), cx)
             });
             BitbucketStore::set_global(store, cx);
             let watch = cx.new(PrWatch::new);

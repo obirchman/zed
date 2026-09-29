@@ -10,7 +10,7 @@ use crate::{diff_multibuffer::DiffMultibuffer, picker_prompt, pr_pipelines::PrPi
 use anyhow::{Context as _, Result, anyhow};
 use bitbucket::{
     BitbucketStore, PrKey, PrWatch, StoreEvent,
-    bbt::write::{InlineAnchor, NewComment, plan},
+    api::{InlineAnchor, NewComment, plan},
     models::{ParticipantState, PullRequest},
 };
 use checkout::{Checkout, CheckoutRequest};
@@ -406,7 +406,7 @@ impl PrReview {
         };
         let old_blocks: HashSet<CustomBlockId> = self.thread_blocks.drain(..).collect();
         let this = cx.weak_entity();
-        let can_write = self.store.read(cx).can_write();
+        let can_write = self.store.read(cx).is_connected();
         let reply = self.reply.as_ref().map(|r| (r.root_id, r.editor.clone()));
         let threads = self.threads.clone();
         let (ids, placed) = rhs.update(cx, |editor, cx| {
@@ -475,7 +475,7 @@ impl PrReview {
         self.placed = placed;
     }
 
-    fn write(&mut self, request: bitbucket::bbt::write::WriteRequest, cx: &mut gpui::Context<Self>) -> Task<Result<()>> {
+    fn write(&mut self, request: bitbucket::api::WriteRequest, cx: &mut gpui::Context<Self>) -> Task<Result<()>> {
         self.write_error = None;
         let key = self.key.clone();
         let send = self
@@ -633,9 +633,9 @@ impl PrReview {
     fn render_header(&self, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let store = self.store.read(cx);
         let data = store.pull_request(&self.key).cloned().unwrap_or_default();
-        let can_write = store.can_write();
+        let can_write = store.is_connected();
         let me = store.me().cloned();
-        let config_error = store.config_error().map(str::to_string);
+        let config_error = store.connection_error().map(str::to_string);
         let colors = cx.theme().colors();
 
         let Some(pr) = data.pull_request.clone() else {
@@ -707,7 +707,7 @@ impl PrReview {
         let write_tooltip = if can_write {
             None
         } else {
-            Some("Needs a Bitbucket write credential: run `bbt auth set write`")
+            Some("Connect to Bitbucket in the Pull requests panel first")
         };
         let approve = Button::new("approve", if i_approved { "Unapprove" } else { "Approve" })
             .style(ButtonStyle::Filled)
