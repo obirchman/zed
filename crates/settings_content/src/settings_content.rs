@@ -1175,6 +1175,12 @@ pub enum HourFormat {
 #[with_fallible_options]
 #[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
 pub struct BitbucketSettingsContent {
+    /// The Atlassian account email that goes with the API token. Leave empty
+    /// for a repository or workspace access token. The token itself is set in
+    /// the Settings window and kept in the system keychain.
+    ///
+    /// Default: ""
+    pub email: Option<String>,
     /// Workspaces searched for pull requests you authored or review.
     ///
     /// Default: ["lundinova", "cluf200", "lundinova-phoenix"]

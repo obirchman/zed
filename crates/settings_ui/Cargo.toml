@@ -17,6 +17,7 @@ default = []
 test-support = []
 
 [dependencies]
+bitbucket.workspace = true
 agent.workspace = true
 agent_settings.workspace = true
 agent_skills.workspace = true

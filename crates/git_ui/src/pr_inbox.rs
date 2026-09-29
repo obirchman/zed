@@ -208,10 +208,6 @@ enum RoleFilter {
 pub struct PrInboxPanel {
     watch: Entity<PrWatch>,
     store: Entity<BitbucketStore>,
-    email: Entity<Editor>,
-    token: Entity<Editor>,
-    connecting: bool,
-    connect_error: Option<String>,
     workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
     position: DockPosition,
@@ -237,17 +233,6 @@ impl PrInboxPanel {
             editor
         });
         let store = BitbucketStore::global(cx);
-        let email = cx.new(|cx| {
-            let mut editor = Editor::single_line(window, cx);
-            editor.set_placeholder_text("Atlassian account email (empty for an access token)", window, cx);
-            editor
-        });
-        let token = cx.new(|cx| {
-            let mut editor = Editor::single_line(window, cx);
-            editor.set_placeholder_text("API token", window, cx);
-            editor.set_masked(true, cx);
-            editor
-        });
         let subscriptions = vec![
             cx.observe(&watch, |_, _, cx| cx.notify()),
             cx.observe(&store, |_, _, cx| cx.notify()),
@@ -260,10 +245,6 @@ impl PrInboxPanel {
         Self {
             watch,
             store,
-            email,
-            token,
-            connecting: false,
-            connect_error: None,
             workspace,
             focus_handle: cx.focus_handle(),
             position: DockPosition::Right,
@@ -430,7 +411,7 @@ impl Render for PrInboxPanel {
                     .p_3()
                     .child(Label::new("Reading the saved Bitbucket credential…").color(Color::Muted))
                     .into_any_element(),
-                _ => self.render_connect(cx),
+                _ => self.render_not_configured(cx),
             };
             return v_flex()
                 .key_context("PrInboxPanel")
@@ -543,79 +524,31 @@ impl Render for PrInboxPanel {
 }
 
 impl PrInboxPanel {
-    fn connect(&mut self, cx: &mut gpui::Context<Self>) {
-        let email = self.email.read(cx).text(cx);
-        let token = self.token.read(cx).text(cx);
-        if token.trim().is_empty() {
-            self.connect_error = Some("Enter an API token".into());
-            cx.notify();
-            return;
-        }
-        self.connecting = true;
-        self.connect_error = None;
-        let connect = self
-            .store
-            .update(cx, |store, cx| store.connect(email, token.trim().to_string(), cx));
-        cx.spawn(async move |this, cx| {
-            let result = connect.await;
-            this.update(cx, |this, cx| {
-                this.connecting = false;
-                this.connect_error = result.err().map(|e| format!("{e:#}"));
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-        cx.notify();
-    }
-
-    /// Shown until a credential is saved: where to get a token and the form
-    /// that checks and saves it.
-    fn render_connect(&self, cx: &mut gpui::Context<Self>) -> AnyElement {
-        let colors = cx.theme().colors();
-        let field = |editor: Entity<Editor>| {
-            div()
-                .px_1()
-                .py_0p5()
-                .border_1()
-                .border_color(colors.border)
-                .rounded_sm()
-                .child(editor)
-        };
+    /// Shown until an API token is set: where to set it.
+    fn render_not_configured(&self, cx: &mut gpui::Context<Self>) -> AnyElement {
+        let error = self.store.read(cx).connection_error().map(str::to_string);
         v_flex()
             .p_3()
             .gap_2()
-            .child(Headline::new("Connect Bitbucket").size(HeadlineSize::Small))
             .child(
-                Label::new(
-                    "Create an API token at id.atlassian.com → Security → API tokens → Create API token with scopes, app Bitbucket. Scopes: read:user, read:workspace, read:repository, read:pullrequest, read:pipeline, write:pullrequest, write:pipeline.",
-                )
-                .size(LabelSize::Small)
-                .color(Color::Muted),
+                Label::new("Set your Bitbucket email and API token in Settings > Bitbucket.")
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
             )
-            .child(field(self.email.clone()))
-            .child(field(self.token.clone()))
             .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("connect-bitbucket", if self.connecting { "Checking…" } else { "Test and save" })
-                            .style(ButtonStyle::Filled)
-                            .disabled(self.connecting)
-                            .on_click(cx.listener(|this, _, _, cx| this.connect(cx))),
-                    )
-                    .child(
-                        Label::new("Saved in Zed's credentials store")
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                    ),
+                Button::new("open-bitbucket-settings", "Open Bitbucket settings")
+                    .style(ButtonStyle::Filled)
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(
+                            Box::new(zed_actions::OpenSettingsAt {
+                                path: "bitbucket.email".into(),
+                                target: None,
+                            }),
+                            cx,
+                        )
+                    }),
             )
-            .when_some(
-                self.connect_error
-                    .clone()
-                    .or_else(|| self.store.read(cx).connection_error().map(str::to_string)),
-                |col, error| col.child(Label::new(error).size(LabelSize::Small).color(Color::Error)),
-            )
+            .when_some(error, |col, error| col.child(Label::new(error).size(LabelSize::Small).color(Color::Error)))
             .into_any_element()
     }
 
@@ -641,15 +574,6 @@ impl PrInboxPanel {
             .border_color(colors.border)
             .when_some(account, |row, name| {
                 row.child(Label::new(format!("Bitbucket: {name}")).size(LabelSize::Small).color(Color::Muted))
-                    .child(
-                        Button::new("disconnect-bitbucket", "Disconnect")
-                            .label_size(LabelSize::Small)
-                            .style(ButtonStyle::Subtle)
-                            .tooltip(Tooltip::text("Forget the saved Bitbucket credential"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.store.update(cx, |store, cx| store.disconnect(cx)).detach_and_log_err(cx);
-                            })),
-                    )
                     .child(div().w_2())
             })
             .child(

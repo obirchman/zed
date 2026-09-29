@@ -478,7 +478,7 @@ impl PrReview {
             }
         });
         let can_mark_handled = watched.as_ref().is_some_and(|w| w.is_changed());
-        let write_tooltip = (!can_write).then_some("Connect to Bitbucket in the Pull requests panel first");
+        let write_tooltip = (!can_write).then_some("Set the Bitbucket API token in Settings > Bitbucket first");
 
         let reviewers = pr
             .participants

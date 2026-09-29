@@ -75,11 +75,125 @@ pub(crate) fn settings_data(cx: &App) -> Vec<SettingsPage> {
         debugger_page(),
         terminal_page(),
         version_control_page(),
+        bitbucket_page(),
         collaboration_page(),
         ai_page(cx),
         network_page(),
         developer_page(cx),
     ]
+}
+
+fn bitbucket_page() -> SettingsPage {
+    fn bitbucket(content: &SettingsContent) -> Option<&settings::BitbucketSettingsContent> {
+        content.bitbucket.as_ref()
+    }
+    SettingsPage {
+        title: "Bitbucket",
+        items: Box::new([
+            SettingsPageItem::SectionHeader("Account"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Email",
+                description: "The Atlassian account email that goes with the API token. Leave empty for a repository or workspace access token.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("bitbucket.email"),
+                    pick: |content| bitbucket(content).and_then(|b| b.email.as_ref()),
+                    write: |content, value, _| {
+                        content.bitbucket.get_or_insert_default().email = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SubPageLink(SubPageLink {
+                title: "API Token".into(),
+                r#type: Default::default(),
+                description: Some("Kept in the system keychain, not in settings.json.".into()),
+                search_aliases: &["bitbucket", "token", "api key", "credential", "atlassian"],
+                json_path: None,
+                in_json: false,
+                files: USER,
+                render: crate::pages::render_bitbucket_token_page,
+            }),
+            SettingsPageItem::SectionHeader("Pull Requests"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Workspaces",
+                description: "Workspaces searched for pull requests you authored or review.",
+                field: Box::new(
+                    SettingField {
+                        organization_override: None,
+                        json_path: Some("bitbucket.workspaces"),
+                        pick: |content| bitbucket(content).and_then(|b| b.workspaces.as_ref()),
+                        write: |content, value, _| {
+                            content.bitbucket.get_or_insert_default().workspaces = value;
+                        },
+                    }
+                    .unimplemented(),
+                ),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Poll Interval",
+                description: "Seconds between checks of the watched pull requests.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("bitbucket.poll_interval_seconds"),
+                    pick: |content| bitbucket(content).and_then(|b| b.poll_interval_seconds.as_ref()),
+                    write: |content, value, _| {
+                        content.bitbucket.get_or_insert_default().poll_interval_seconds = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Full Scan Interval",
+                description: "Minutes between searches of every repository for pull requests you review.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("bitbucket.full_scan_minutes"),
+                    pick: |content| bitbucket(content).and_then(|b| b.full_scan_minutes.as_ref()),
+                    write: |content, value, _| {
+                        content.bitbucket.get_or_insert_default().full_scan_minutes = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Notifications",
+                description: "Show a desktop notification when a handled pull request changes.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("bitbucket.notifications"),
+                    pick: |content| bitbucket(content).and_then(|b| b.notifications.as_ref()),
+                    write: |content, value, _| {
+                        content.bitbucket.get_or_insert_default().notifications = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Clone Roots",
+                description: "Directories searched for your own clone of a pull request's repository.",
+                field: Box::new(
+                    SettingField {
+                        organization_override: None,
+                        json_path: Some("bitbucket.clone_roots"),
+                        pick: |content| bitbucket(content).and_then(|b| b.clone_roots.as_ref()),
+                        write: |content, value, _| {
+                            content.bitbucket.get_or_insert_default().clone_roots = value;
+                        },
+                    }
+                    .unimplemented(),
+                ),
+                metadata: None,
+                files: USER,
+            }),
+        ]),
+    }
 }
 
 fn developer_page(cx: &App) -> SettingsPage {

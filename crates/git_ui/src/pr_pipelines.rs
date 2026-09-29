@@ -349,7 +349,7 @@ impl Render for PrPipelines {
                         Button::new("run-branch", "Run pipeline on branch")
                             .style(ButtonStyle::Filled)
                             .disabled(!can_write)
-                            .when(!can_write, |b| b.tooltip(Tooltip::text("Connect to Bitbucket in the Pull requests panel first")))
+                            .when(!can_write, |b| b.tooltip(Tooltip::text("Set the Bitbucket API token in Settings > Bitbucket first")))
                             .on_click(cx.listener(|this, _, _, cx| this.rerun(cx))),
                     )
                     .child(

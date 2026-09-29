@@ -996,6 +996,10 @@
     },
   },
   "bitbucket": {
+    // The Atlassian account email that goes with the API token; empty for an
+    // access token. The token itself is set in the Settings window
+    // (Bitbucket > API Token) and kept in the system keychain.
+    "email": "",
     // Workspaces searched for pull requests you authored or review.
     "workspaces": ["lundinova", "cluf200", "lundinova-phoenix"],
     // Seconds between checks of the watched pull requests.

@@ -1,11 +1,12 @@
 use crate::api::{Auth, Client, DEFAULT_API_BASE, Http, WriteRequest};
 use crate::models::{self, Account, BuildStatus, Comment, DiffstatEntry, Pipeline, PullRequest, Step};
 use crate::repo::RepoRef;
-use crate::ZedHttp;
+use crate::{BitbucketSettings, ZedHttp};
 use anyhow::{Context as _, Result, anyhow};
 use collections::{HashMap, HashSet};
 use gpui::{App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Global, Task};
 use serde_json::Value;
+use settings::{Settings as _, SettingsStore};
 use std::sync::Arc;
 
 /// The key the credential is stored under in Zed's credentials store.
@@ -61,6 +62,11 @@ impl Global for GlobalBitbucketStore {}
 pub struct BitbucketStore {
     http: Arc<dyn Http>,
     base: String,
+    /// The API token from the keychain; the email comes from settings.
+    token: Option<String>,
+    /// The account name saved with the token, used when the email setting is empty.
+    saved_username: String,
+    email: String,
     client: Option<Arc<Client>>,
     connection: Connection,
     /// Why the last connection attempt or credential read failed.
@@ -71,6 +77,7 @@ pub struct BitbucketStore {
     steps: HashMap<(RepoRef, String), Vec<Step>>,
     fetching: HashSet<PrKey>,
     _load: Option<Task<()>>,
+    _settings: Option<gpui::Subscription>,
 }
 
 impl EventEmitter<StoreEvent> for BitbucketStore {}
@@ -98,6 +105,9 @@ impl BitbucketStore {
         Self {
             http,
             base,
+            token: None,
+            saved_username: String::new(),
+            email: String::new(),
             client: None,
             connection: Connection::Loading,
             connection_error: None,
@@ -107,31 +117,80 @@ impl BitbucketStore {
             steps: HashMap::default(),
             fetching: HashSet::default(),
             _load: None,
+            _settings: None,
         }
     }
 
-    /// A store on Zed's HTTP client, connected with the credential saved in
-    /// Zed's credentials store, if there is one.
+    /// A store on Zed's HTTP client, with the email from settings and the API
+    /// token from Zed's credentials store.
     fn new(cx: &mut Context<Self>) -> Self {
         let http: Arc<dyn Http> = Arc::new(ZedHttp::new(cx.http_client(), cx.background_executor().clone()));
         let mut this = Self::empty(http, DEFAULT_API_BASE.to_string());
+        this.email = BitbucketSettings::get_global(cx).email.clone();
+        this._settings = Some(cx.observe_global::<SettingsStore>(|this, cx| {
+            let email = BitbucketSettings::get_global(cx).email.clone();
+            if email != this.email {
+                this.email = email;
+                this.rebuild_client(cx);
+            }
+        }));
         let provider = zed_credentials_provider::global(cx);
         this._load = Some(cx.spawn(async move |this, cx| {
             let stored = provider.read_credentials(CREDENTIAL_URL, cx).await;
-            this.update(cx, |this, cx| match stored {
-                Ok(Some((email, token))) => {
-                    let token = String::from_utf8_lossy(&token).to_string();
-                    this.set_client(Some(Auth::new(&email, &token)), cx);
+            this.update(cx, |this, cx| {
+                match stored {
+                    Ok(Some((username, token))) => {
+                        this.saved_username = username;
+                        this.token = Some(String::from_utf8_lossy(&token).to_string());
+                    }
+                    Ok(None) => this.token = None,
+                    Err(e) => {
+                        this.connection_error = Some(format!("reading the saved Bitbucket API token: {e:#}"))
+                    }
                 }
-                Ok(None) => this.set_client(None, cx),
-                Err(e) => {
-                    this.connection_error = Some(format!("reading the saved Bitbucket credential: {e:#}"));
-                    this.set_client(None, cx);
-                }
+                this.rebuild_client(cx);
             })
             .ok();
         }));
         this
+    }
+
+    fn rebuild_client(&mut self, cx: &mut Context<Self>) {
+        let auth = self.token.as_ref().map(|token| {
+            let email = if self.email.trim().is_empty() {
+                &self.saved_username
+            } else {
+                &self.email
+            };
+            Auth::new(email, token)
+        });
+        self.set_client(auth, cx);
+    }
+
+    /// Save `token` as the API token in Zed's credentials store and use it,
+    /// or forget the saved token with `None`.
+    pub fn set_token(&mut self, token: Option<String>, cx: &mut Context<Self>) -> Task<Result<()>> {
+        let provider = zed_credentials_provider::global(cx);
+        let email = self.email.trim().to_string();
+        cx.spawn(async move |this, cx| {
+            match &token {
+                Some(token) => save_credential(provider.as_ref(), &email, token, cx).await?,
+                None => provider
+                    .delete_credentials(CREDENTIAL_URL, cx)
+                    .await
+                    .context("removing the Bitbucket API token")?,
+            }
+            this.update(cx, |this, cx| {
+                this.saved_username = email;
+                this.token = token;
+                this.connection_error = None;
+                this.rebuild_client(cx);
+            })
+        })
+    }
+
+    pub fn has_token(&self) -> bool {
+        self.token.is_some()
     }
 
     /// A store whose client sends through `http` with `auth`, instead of
@@ -178,33 +237,6 @@ impl BitbucketStore {
         }));
     }
 
-    /// Check `email` and `token` against Bitbucket, then save them in Zed's
-    /// credentials store and use them. An empty email means an access token
-    /// (Bearer); otherwise an Atlassian API token with its account email.
-    pub fn connect(&mut self, email: String, token: String, cx: &mut Context<Self>) -> Task<Result<()>> {
-        let auth = Auth::new(&email, &token);
-        let client = Client::new(self.http.clone(), auth.clone(), self.base.clone());
-        let check = cx.background_spawn(async move { client.current_user().await });
-        let provider = zed_credentials_provider::global(cx);
-        cx.spawn(async move |this, cx| {
-            let me: Account = models::decode(check.await.context("Bitbucket rejected the credential")?)?;
-            save_credential(provider.as_ref(), &email, &token, cx).await?;
-            this.update(cx, |this, cx| {
-                this.set_client(Some(auth), cx);
-                this.me = Some(me);
-            })
-        })
-    }
-
-    /// Forget the saved credential.
-    pub fn disconnect(&mut self, cx: &mut Context<Self>) -> Task<Result<()>> {
-        let provider = zed_credentials_provider::global(cx);
-        cx.spawn(async move |this, cx| {
-            provider.delete_credentials(CREDENTIAL_URL, cx).await?;
-            this.update(cx, |this, cx| this.set_client(None, cx))
-        })
-    }
-
     pub fn is_connected(&self) -> bool {
         self.connection == Connection::Connected
     }
@@ -225,7 +257,7 @@ impl BitbucketStore {
     pub(crate) fn client(&self) -> Result<Arc<Client>> {
         self.client
             .clone()
-            .ok_or_else(|| anyhow!("Not connected to Bitbucket: use Connect in the Pull requests panel"))
+            .ok_or_else(|| anyhow!("No Bitbucket API token: set it in Settings > Bitbucket > API Token"))
     }
 
     /// The Bitbucket repository a git remote URL points to.
@@ -488,7 +520,7 @@ mod tests {
         let disconnected = cx.new(|cx| BitbucketStore::with_http(http, None, "http://test.example/2.0".into(), cx));
         let count = seen.lock().len();
         let result = disconnected.update(cx, |store, cx| store.execute(request, None, cx)).await;
-        assert!(result.unwrap_err().to_string().contains("Not connected"));
+        assert!(result.unwrap_err().to_string().contains("No Bitbucket API token"));
         assert_eq!(seen.lock().len(), count);
     }
 }

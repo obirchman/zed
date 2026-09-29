@@ -16792,6 +16792,7 @@ dependencies = [
  "agent_skills",
  "anyhow",
  "audio",
+ "bitbucket",
  "client",
  "cloud_api_types",
  "codestral",
