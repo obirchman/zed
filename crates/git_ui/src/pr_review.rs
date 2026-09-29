@@ -56,8 +56,8 @@ pub(crate) fn register(workspace: &mut Workspace, _cx: &mut gpui::Context<Worksp
 }
 
 enum CheckoutState {
-    /// Waiting for the pull request's commits from Bitbucket.
-    Waiting,
+    /// Not checked out; Open PR locally starts it.
+    NotStarted,
     Preparing,
     Ready(Checkout),
     Failed(String),
@@ -188,7 +188,7 @@ impl PrReview {
             project,
             workspace,
             store,
-            checkout: CheckoutState::Waiting,
+            checkout: CheckoutState::NotStarted,
             worktree_id: None,
             repository: None,
             threads: Vec::new(),
@@ -211,7 +211,7 @@ impl PrReview {
             .and_then(|data| data.pull_request.clone())
     }
 
-    fn pull_request_updated(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
+    fn pull_request_updated(&mut self, _window: &mut Window, cx: &mut gpui::Context<Self>) {
         let Some(data) = self.store.read(cx).pull_request(&self.key).cloned() else {
             return;
         };
@@ -224,11 +224,6 @@ impl PrReview {
         });
         self.threads = threads;
         self.list.reset(self.threads.len());
-        if matches!(self.checkout, CheckoutState::Waiting)
-            && let Some(pr) = &data.pull_request
-        {
-            self.start_checkout(pr, window, cx);
-        }
         cx.notify();
     }
 
@@ -274,22 +269,21 @@ impl PrReview {
                 let worktree_id = worktree.read_with(cx, |worktree, _| worktree.id());
                 let repository = wait_for_repository(&this, &checkout.path, cx).await?;
                 let base: SharedString = checkout.base.clone().into();
-                let project = this.update(cx, |this, cx| {
+                this.update(cx, |this, cx| {
                     editor_threads::register_worktree(checkout.path.clone(), this.key.clone(), cx);
                     let repo_id = repository.read(cx).id;
                     this.project.read(cx).git_store().clone().update(cx, |git_store, cx| {
-                        git_store.set_repository_diff_base(repo_id, Some(base.clone()), cx);
+                        git_store.set_repository_diff_base(repo_id, Some(base), cx);
                         git_store.set_active_repo_for_worktree(worktree_id, cx);
                     });
                     this.worktree_id = Some(worktree_id);
-                    this.repository = Some(repository.clone());
+                    this.repository = Some(repository);
                     this.checkout = CheckoutState::Ready(checkout);
                     cx.notify();
-                    this.project.clone()
                 })?;
-                // Zed's own diff of the worktree against the pull request's destination.
+                // The git panel now lists the pull request's files; clicking one opens its diff.
                 workspace.update_in(cx, |workspace, window, cx| {
-                    open_diff(workspace, project, repository, base, window, cx)
+                    workspace.focus_panel::<crate::git_panel::GitPanel>(window, cx);
                 })?;
                 Ok(())
             }
@@ -303,6 +297,33 @@ impl PrReview {
             }
         });
         self._tasks.push(task);
+    }
+
+    /// Check the head out as a worktree and show the pull request in the
+    /// git panel. Once checked out, focus the git panel again.
+    fn open_locally(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
+        match &self.checkout {
+            CheckoutState::NotStarted | CheckoutState::Failed(_) => {
+                if let Some(pr) = self.pull_request(cx) {
+                    self.start_checkout(&pr, window, cx);
+                    cx.notify();
+                }
+            }
+            CheckoutState::Preparing => {}
+            CheckoutState::Ready(_) => {
+                if let Some(worktree_id) = self.worktree_id {
+                    self.project.read(cx).git_store().clone().update(cx, |git_store, cx| {
+                        git_store.set_active_repo_for_worktree(worktree_id, cx);
+                    });
+                }
+                let workspace = self.workspace.clone();
+                window.defer(cx, move |window, cx| {
+                    workspace
+                        .update(cx, |workspace, cx| workspace.focus_panel::<crate::git_panel::GitPanel>(window, cx))
+                        .ok();
+                });
+            }
+        }
     }
 
     fn show_diff(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
@@ -509,7 +530,9 @@ impl PrReview {
         });
 
         let checkout_line = match &self.checkout {
-            CheckoutState::Waiting => "Waiting for the pull request's commits…".to_string(),
+            CheckoutState::NotStarted => {
+                "Not checked out. Open PR locally lists its files in the git panel, with code navigation in its diff.".to_string()
+            }
             CheckoutState::Preparing => "Fetching and checking out the pull request's head…".to_string(),
             CheckoutState::Ready(c) if c.kept_local_changes => format!(
                 "Checked out in {} at {} (kept: the worktree has local changes)",
@@ -576,6 +599,22 @@ impl PrReview {
                                 })),
                         )
                     })
+                    .child(
+                        Button::new(
+                            "open-locally",
+                            match self.checkout {
+                                CheckoutState::Preparing => "Opening…",
+                                CheckoutState::Ready(_) => "Show in git panel",
+                                _ => "Open PR locally",
+                            },
+                        )
+                        .style(ButtonStyle::Filled)
+                        .disabled(matches!(self.checkout, CheckoutState::Preparing))
+                        .tooltip(Tooltip::text(
+                            "Check the pull request out as a worktree and list its files in the git panel",
+                        ))
+                        .on_click(cx.listener(|this, _, window, cx| this.open_locally(window, cx))),
+                    )
                     .child(
                         Button::new("show-diff", "Diff")
                             .style(ButtonStyle::Filled)
