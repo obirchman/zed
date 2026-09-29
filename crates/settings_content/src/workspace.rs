@@ -756,6 +756,9 @@ pub enum OnLastWindowClosed {
     PlatformDefault,
     /// Quit the application the last window is closed
     QuitApp,
+    /// Keep running with no window open, with an icon in the system tray, so
+    /// pull request notifications continue
+    KeepRunning,
 }
 
 #[derive(
@@ -784,10 +787,15 @@ pub enum TextRenderingMode {
 }
 
 impl OnLastWindowClosed {
+    pub fn is_keep_running(&self) -> bool {
+        matches!(self, OnLastWindowClosed::KeepRunning)
+    }
+
     pub fn is_quit_app(&self) -> bool {
         match self {
             OnLastWindowClosed::PlatformDefault => false,
             OnLastWindowClosed::QuitApp => true,
+            OnLastWindowClosed::KeepRunning => false,
         }
     }
 }

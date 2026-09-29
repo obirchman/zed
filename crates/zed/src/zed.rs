@@ -349,11 +349,17 @@ fn bind_on_window_closed(cx: &mut App) -> Option<gpui::Subscription> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Some(cx.on_window_closed(|cx, _window_id| {
-            if cx.windows().is_empty() {
-                cx.quit();
-            }
-        }))
+        // With `keep_running`, the tray icon brings a window back.
+        (!WorkspaceSettings::get_global(cx)
+            .on_last_window_closed
+            .is_keep_running())
+        .then(|| {
+            cx.on_window_closed(|cx, _window_id| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+        })
     }
 }
 
