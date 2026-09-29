@@ -592,9 +592,14 @@ impl PrReview {
         };
         let repo = self.key.repo.clone();
         let branch = pr.source.branch.name;
-        self.workspace
-            .update(cx, |workspace, cx| PrPipelines::open(workspace, repo, branch, window, cx))
-            .ok();
+        let workspace = self.workspace.clone();
+        // Adding a tab reads every item in the pane, this review included, so
+        // it must happen after this review's update has finished.
+        window.defer(cx, move |window, cx| {
+            workspace
+                .update(cx, |workspace, cx| PrPipelines::open(workspace, repo, branch, window, cx))
+                .ok();
+        });
     }
 
     /// Remove the review's worktree from the project and from disk, then close
