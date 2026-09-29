@@ -2280,8 +2280,10 @@ dependencies = [
  "http_client",
  "log",
  "parking_lot",
+ "paths",
  "serde_json",
  "settings",
+ "tempfile",
 ]
 
 [[package]]

@@ -1003,7 +1003,10 @@
     // Minutes between searches of every repository for pull requests you review.
     "full_scan_minutes": 60,
     // Show a desktop notification when a handled pull request changes.
-    "notifications": true
+    "notifications": true,
+    // Directories searched (three levels deep) for your own clone of a pull
+    // request's repository.
+    "clone_roots": ["~/base/lab", "~/base/repos"]
   },
   "outline_panel": {
     // Whether to show the outline panel button in the status bar

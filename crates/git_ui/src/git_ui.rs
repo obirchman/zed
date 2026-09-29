@@ -48,6 +48,7 @@ pub mod git_picker;
 mod git_runtime_diagnostics;
 pub mod multi_diff_view;
 pub mod picker_prompt;
+pub mod pr_inbox;
 pub mod pr_pipelines;
 pub mod pr_review;
 pub mod project_diff;
@@ -64,6 +65,7 @@ pub use conflict_view::MergeConflictIndicator;
 
 pub fn init(cx: &mut App) {
     bitbucket::init(cx);
+    pr_inbox::init(cx);
     editor::set_blame_renderer(blame_ui::GitBlameRenderer, cx);
     commit_view::init(cx);
     git_graph::init(cx);
@@ -113,6 +115,7 @@ pub fn init(cx: &mut App) {
         unstaged_diff::UnstagedDiff::register(workspace, cx);
         branch_diff::BranchDiff::register(workspace, cx);
         pr_review::register(workspace, cx);
+        pr_inbox::register(workspace);
         CommitModal::register(workspace);
         git_panel::register(workspace);
         repository_selector::register(workspace);

@@ -9,7 +9,7 @@ mod threads;
 use crate::{diff_multibuffer::DiffMultibuffer, picker_prompt, pr_pipelines::PrPipelines};
 use anyhow::{Context as _, Result, anyhow};
 use bitbucket::{
-    BitbucketStore, PrKey, StoreEvent,
+    BitbucketStore, PrKey, PrWatch, StoreEvent,
     bbt::write::{InlineAnchor, NewComment, plan},
     models::{ParticipantState, PullRequest},
 };
@@ -219,6 +219,10 @@ impl PrReview {
             }
         });
         store.update(cx, |store, cx| store.refresh_pull_request(key.clone(), cx));
+        let mut subscriptions = vec![subscription];
+        if let Some(watch) = PrWatch::try_global(cx) {
+            subscriptions.push(cx.observe(&watch, |_, _, cx| cx.notify()));
+        }
         let mut this = Self {
             key,
             repo_root,
@@ -236,7 +240,7 @@ impl PrReview {
             show_conversation: true,
             write_error: None,
             focus_handle: cx.focus_handle(),
-            _subscriptions: vec![subscription],
+            _subscriptions: subscriptions,
             _tasks: Vec::new(),
         };
         this.pull_request_updated(window, cx);
@@ -722,6 +726,15 @@ impl PrReview {
             .collect();
         let reply = self.reply.as_ref().map(|r| (r.root_id, r.editor.clone()));
         let this = cx.weak_entity();
+        let watched = PrWatch::try_global(cx).and_then(|watch| watch.read(cx).get(&self.key).cloned());
+        let handled_line = watched.as_ref().map(|w| {
+            if w.is_changed() {
+                (format!("Since you handled it: {}", w.summary()), Color::Accent)
+            } else {
+                ("Handled: nothing new since".to_string(), Color::Muted)
+            }
+        });
+        let can_mark_handled = watched.as_ref().is_some_and(|w| w.is_changed());
 
         v_flex()
             .id("pr-header")
@@ -758,6 +771,9 @@ impl PrReview {
                         .color(Color::Muted),
                     ),
             )
+            .when_some(handled_line, |header, (text, color)| {
+                header.child(Label::new(text).size(LabelSize::Small).color(color))
+            })
             .child(h_flex().gap_3().flex_wrap().children(reviewers))
             .when(!data.statuses.is_empty(), |header| {
                 header.child(h_flex().gap_3().flex_wrap().children(builds))
@@ -766,6 +782,21 @@ impl PrReview {
                 h_flex()
                     .gap_1()
                     .flex_wrap()
+                    .when(can_mark_handled, |row| {
+                        row.child(
+                            Button::new("mark-handled", "Mark handled")
+                                .style(ButtonStyle::Filled)
+                                .tooltip(Tooltip::text(
+                                    "No more notifications for this pull request until something new happens",
+                                ))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if let Some(watch) = PrWatch::try_global(cx) {
+                                        let key = this.key.clone();
+                                        watch.update(cx, |watch, cx| watch.mark_handled(&key, cx));
+                                    }
+                                })),
+                        )
+                    })
                     .child(approve)
                     .child(request_changes)
                     .child(

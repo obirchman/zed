@@ -21,10 +21,12 @@ futures.workspace = true
 gpui.workspace = true
 http_client.workspace = true
 log.workspace = true
+paths.workspace = true
 serde_json.workspace = true
 settings.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 parking_lot.workspace = true
 db = { workspace = true, features = ["test-support"] }
 settings = { workspace = true, features = ["test-support"] }

@@ -1193,6 +1193,12 @@ pub struct BitbucketSettingsContent {
     ///
     /// Default: true
     pub notifications: Option<bool>,
+    /// Directories searched (three levels deep) for your own clone of a
+    /// pull request's repository; a review checks the pull request out as a
+    /// worktree of that clone.
+    ///
+    /// Default: ["~/base/lab", "~/base/repos"]
+    pub clone_roots: Option<Vec<String>>,
 }
 
 #[with_fallible_options]

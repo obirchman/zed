@@ -4,6 +4,7 @@
 //! the store, the store caches the latest answer per pull request, comment list
 //! and pipeline list, and emits `StoreEvent` when one changes.
 
+mod clones;
 mod http;
 mod persistence;
 mod settings;
@@ -13,6 +14,7 @@ mod watch;
 pub use bbt;
 pub use bbt::models;
 pub use bbt::repo::RepoRef;
+pub use clones::find_local_clone;
 pub use http::ZedHttp;
 pub use settings::BitbucketSettings;
 pub use store::{BitbucketStore, PipelineKey, PrData, PrKey, StoreEvent};
