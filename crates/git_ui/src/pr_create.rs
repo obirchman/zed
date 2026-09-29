@@ -15,16 +15,46 @@ use gpui::{
     WeakEntity,
 };
 use std::path::PathBuf;
-use ui::{Checkbox, ToggleState, Tooltip, prelude::*};
+use project::git_store::Repository;
+use ui::{Checkbox, ContextMenu, DropdownMenu, DropdownStyle, IconPosition, ToggleState, Tooltip, prelude::*};
 use workspace::{ModalView, Workspace};
+
+#[derive(Clone, Debug)]
+struct SourceBranch {
+    name: String,
+    head: Option<String>,
+    subject: Option<String>,
+    /// Only on origin; its commits are named `origin/<name>` locally.
+    remote_only: bool,
+}
+
+impl SourceBranch {
+    fn git_ref(&self) -> String {
+        if self.remote_only {
+            format!("origin/{}", self.name)
+        } else {
+            self.name.clone()
+        }
+    }
+}
 
 pub struct CreatePrModal {
     repo: RepoRef,
     repo_root: PathBuf,
     workspace: WeakEntity<Workspace>,
     source: String,
-    /// The local branch head, to compare with Bitbucket's.
+    /// The branch head in the local repository, to compare with Bitbucket's.
     local_head: Option<String>,
+    /// Branches to pick the source from: local ones, then ones only on origin.
+    branches: Vec<SourceBranch>,
+    repository: Entity<Repository>,
+    /// The branch checked out when the form opened; Zed's Push pushes it.
+    checked_out: String,
+    pushing: bool,
+    /// The title and description last filled in automatically; a field
+    /// still holding its automatic text is refilled when the source changes.
+    auto_title: Option<String>,
+    auto_description: Option<String>,
     context: Option<CreateContext>,
     loading: bool,
     title: Entity<Editor>,
@@ -80,7 +110,7 @@ impl CreatePrModal {
         };
         let workspace_handle = cx.weak_entity();
         workspace.toggle_modal(window, cx, |window, cx| {
-            Self::new(repo, repo_root, source, local_head, last_subject, workspace_handle, window, cx)
+            Self::new(repo, repo_root, repository, source, local_head, last_subject, workspace_handle, window, cx)
         });
     }
 
@@ -88,6 +118,7 @@ impl CreatePrModal {
     fn new(
         repo: RepoRef,
         repo_root: PathBuf,
+        repository: Entity<Repository>,
         source: String,
         local_head: Option<String>,
         last_subject: Option<String>,
@@ -105,7 +136,7 @@ impl CreatePrModal {
                 editor
             })
         };
-        let title = single_line("Title", last_subject, window, cx);
+        let title = single_line("Title", last_subject.clone(), window, cx);
         let destination = single_line("Destination branch", None, window, cx);
         let other_reviewers = single_line("More reviewers: names, comma-separated", None, window, cx);
         let description = cx.new(|cx| {
@@ -114,12 +145,19 @@ impl CreatePrModal {
             editor
         });
         window.focus(&title.focus_handle(cx), cx);
+        let checked_out_branch = source.clone();
         let mut this = Self {
             repo,
             repo_root,
             workspace,
             source,
             local_head,
+            branches: Vec::new(),
+            repository,
+            checked_out: checked_out_branch,
+            pushing: false,
+            auto_title: last_subject,
+            auto_description: None,
             context: None,
             loading: false,
             title,
@@ -134,7 +172,79 @@ impl CreatePrModal {
             focus_handle: cx.focus_handle(),
         };
         this.load(window, cx);
+        this.load_branches(window, cx);
         this
+    }
+
+    fn load_branches(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
+        let branches = self.repository.update(cx, |repository, _| repository.branches());
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(scan)) = branches.await else {
+                return;
+            };
+            let mut local: Vec<SourceBranch> = Vec::new();
+            let mut remote: Vec<SourceBranch> = Vec::new();
+            for branch in &scan.branches {
+                let entry = |name: &str, remote_only| SourceBranch {
+                    name: name.to_string(),
+                    head: branch.most_recent_commit.as_ref().map(|c| c.sha.to_string()),
+                    subject: branch.most_recent_commit.as_ref().map(|c| c.subject.to_string()),
+                    remote_only,
+                };
+                if !branch.is_remote() {
+                    local.push(entry(branch.name(), false));
+                } else if branch.remote_name() == Some("origin")
+                    && let Some(name) = branch.name().strip_prefix("origin/")
+                    && name != "HEAD"
+                {
+                    remote.push(entry(name, true));
+                }
+            }
+            remote.retain(|r| !local.iter().any(|l| l.name == r.name));
+            local.sort_by(|a, b| a.name.cmp(&b.name));
+            remote.sort_by(|a, b| a.name.cmp(&b.name));
+            local.extend(remote);
+            this.update(cx, |this, cx| {
+                this.branches = local;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Make `branch` the source: its head and title, a recheck on
+    /// Bitbucket, and the description of its commits.
+    fn select_source(&mut self, branch: SourceBranch, window: &mut Window, cx: &mut gpui::Context<Self>) {
+        if branch.name == self.source {
+            return;
+        }
+        self.source = branch.name.clone();
+        self.local_head = branch.head.clone();
+        let title = self.title.read(cx).text(cx);
+        if title.is_empty() || Some(&title) == self.auto_title.as_ref() {
+            let subject = branch.subject.unwrap_or_default();
+            self.title.update(cx, |editor, cx| editor.set_text(subject.as_str(), window, cx));
+            self.auto_title = Some(subject);
+        }
+        let description = self.description.read(cx).text(cx);
+        if Some(&description) == self.auto_description.as_ref() {
+            self.description.update(cx, |editor, cx| editor.set_text("", window, cx));
+        }
+        let destination = self.destination.read(cx).text(cx).trim().to_string();
+        if !destination.is_empty() {
+            self.fill_description(destination, window, cx);
+        }
+        self.load(window, cx);
+        cx.notify();
+    }
+
+    fn source_ref(&self) -> String {
+        self.branches
+            .iter()
+            .find(|b| b.name == self.source)
+            .map(SourceBranch::git_ref)
+            .unwrap_or_else(|| self.source.clone())
     }
 
     /// Ask Bitbucket for the main branch, whether the branch is pushed, and
@@ -186,7 +296,7 @@ impl CreatePrModal {
             return;
         }
         let root = self.repo_root.clone();
-        let range = format!("origin/{destination}..HEAD");
+        let range = format!("origin/{destination}..{}", self.source_ref());
         let log = cx.background_spawn(async move {
             let output = util::command::new_command("git")
                 .current_dir(&root)
@@ -196,17 +306,22 @@ impl CreatePrModal {
             anyhow::Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
         });
         let description = self.description.clone();
-        cx.spawn_in(window, async move |_, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             if let Ok(text) = log.await
                 && !text.is_empty()
             {
-                description
+                let filled = description
                     .update_in(cx, |editor, window, cx| {
-                        if editor.text(cx).is_empty() {
+                        let empty = editor.text(cx).is_empty();
+                        if empty {
                             editor.set_text(text.as_str(), window, cx);
                         }
+                        empty
                     })
-                    .ok();
+                    .unwrap_or(false);
+                if filled {
+                    this.update(cx, |this, _| this.auto_description = Some(text)).ok();
+                }
             }
         })
         .detach();
@@ -286,6 +401,68 @@ impl CreatePrModal {
         cx.emit(DismissEvent);
     }
 
+    fn render_source_picker(&self, window: &mut Window, cx: &mut gpui::Context<Self>) -> AnyElement {
+        let branches = self.branches.clone();
+        let current = self.source.clone();
+        let this = cx.weak_entity();
+        let menu = ContextMenu::build(window, cx, move |mut menu, _, _| {
+            for branch in branches {
+                let label = if branch.remote_only {
+                    format!("{} (only on origin)", branch.name)
+                } else {
+                    branch.name.clone()
+                };
+                let this = this.clone();
+                let is_current = branch.name == current;
+                menu = menu.toggleable_entry(label, is_current, IconPosition::Start, None, move |window, cx| {
+                    this.update(cx, |this, cx| this.select_source(branch.clone(), window, cx)).ok();
+                });
+            }
+            menu
+        });
+        DropdownMenu::new("source-branch", self.source.clone(), menu)
+            .style(DropdownStyle::Outlined)
+            .full_width(true)
+            .into_any_element()
+    }
+
+    /// Push the source branch: Zed's Push for the checked-out branch, else
+    /// `git push origin <branch>`; then check Bitbucket again.
+    fn push(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
+        if self.source == self.checked_out {
+            window.dispatch_action(Box::new(git::Push), cx);
+            return;
+        }
+        self.pushing = true;
+        self.error = None;
+        let (root, branch) = (self.repo_root.clone(), self.source.clone());
+        let push = cx.background_spawn(async move {
+            let output = util::command::new_command("git")
+                .current_dir(&root)
+                .args(["push", "origin", &branch])
+                .output()
+                .await?;
+            if !output.status.success() {
+                anyhow::bail!("git push failed: {}", String::from_utf8_lossy(&output.stderr).trim());
+            }
+            anyhow::Ok(())
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = push.await;
+            this.update_in(cx, |this, window, cx| {
+                this.pushing = false;
+                match result {
+                    Ok(()) => this.load(window, cx),
+                    Err(e) => this.error = Some(format!("{e:#}")),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn render_push_status(&self, cx: &mut gpui::Context<Self>) -> Option<AnyElement> {
         let context = self.context.as_ref()?;
         let (text, color, needs_push) = match (&context.source_remote_head, &self.local_head) {
@@ -308,9 +485,10 @@ impl CreatePrModal {
                 .child(Label::new(text).size(LabelSize::Small).color(color))
                 .when(needs_push, |row| {
                     row.child(
-                        Button::new("push-branch", "Push")
+                        Button::new("push-branch", if self.pushing { "Pushing…" } else { "Push" })
                             .style(ButtonStyle::Filled)
-                            .on_click(|_, window, cx| window.dispatch_action(Box::new(git::Push), cx)),
+                            .disabled(self.pushing)
+                            .on_click(cx.listener(|this, _, window, cx| this.push(window, cx))),
                     )
                     .child(
                         Button::new("recheck-branch", "Check again")
@@ -333,7 +511,7 @@ impl Focusable for CreatePrModal {
 }
 
 impl Render for CreatePrModal {
-    fn render(&mut self, _window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let push_status = self.render_push_status(cx);
         let border = cx.theme().colors().border;
         let field = |label: &'static str, editor: Entity<Editor>| {
@@ -377,8 +555,10 @@ impl Render for CreatePrModal {
                     .child(Label::new(self.repo.to_string()).color(Color::Muted)),
             )
             .child(
-                Label::new(format!("From {}", self.source))
-                    .size(LabelSize::Small),
+                v_flex()
+                    .gap_0p5()
+                    .child(Label::new("From").size(LabelSize::Small).color(Color::Muted))
+                    .child(self.render_source_picker(window, cx)),
             )
             .when(self.loading, |col| {
                 col.child(Label::new("Checking the branch on Bitbucket…").size(LabelSize::Small).color(Color::Muted))
