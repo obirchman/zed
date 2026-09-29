@@ -381,7 +381,7 @@ impl PrReview {
 
     /// Open the thread's file in the review worktree at the thread's line.
     fn go_to_thread(&mut self, thread: &Thread, window: &mut Window, cx: &mut gpui::Context<Self>) {
-        let (Place::NewLine { path, line } | Place::OldLine { path, line }) = &thread.place else {
+        let Place::NewLine { path, line } = &thread.place else {
             return;
         };
         let CheckoutState::Ready(checkout) = &self.checkout else {
@@ -675,7 +675,8 @@ impl PrReview {
             .as_ref()
             .filter(|r| r.root_id == thread.root.id)
             .map(|r| r.editor.clone());
-        let go_to = matches!(thread.place, Place::NewLine { .. } | Place::OldLine { .. })
+        // A removed line's number means nothing in the checked-out file.
+        let go_to = matches!(thread.place, Place::NewLine { .. })
             .then(|| {
                 let thread = thread.clone();
                 Button::new(("go-to", thread.root.id), "Go to line")
