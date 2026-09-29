@@ -199,6 +199,14 @@ fn set_start_at_login(enabled: bool) -> Result<()> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+enum SortBy {
+    /// Changed since handled first, each group most recently updated first.
+    ChangedFirst,
+    Updated,
+    Created,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum RoleFilter {
     Both,
     Reviewer,
@@ -213,6 +221,7 @@ pub struct PrInboxPanel {
     position: DockPosition,
     changed_only: bool,
     role: RoleFilter,
+    sort_by: SortBy,
     search: Entity<Editor>,
     _subscriptions: Vec<Subscription>,
 }
@@ -250,6 +259,7 @@ impl PrInboxPanel {
             position: DockPosition::Right,
             changed_only: false,
             role: RoleFilter::Both,
+            sort_by: SortBy::ChangedFirst,
             search,
             _subscriptions: subscriptions,
         }
@@ -280,8 +290,15 @@ impl PrInboxPanel {
             })
             .cloned()
             .collect();
-        // Changed pull requests first, each group most recently updated first.
-        rows.sort_by_key(|p| !p.is_changed());
+        // Bitbucket's timestamps are ISO 8601, so they sort as text.
+        match self.sort_by {
+            SortBy::ChangedFirst => {
+                rows.sort_by(|a, b| b.pull_request.updated_on.cmp(&a.pull_request.updated_on));
+                rows.sort_by_key(|p| !p.is_changed());
+            }
+            SortBy::Updated => rows.sort_by(|a, b| b.pull_request.updated_on.cmp(&a.pull_request.updated_on)),
+            SortBy::Created => rows.sort_by(|a, b| b.pull_request.created_on.cmp(&a.pull_request.created_on)),
+        }
         rows
     }
 
@@ -498,6 +515,24 @@ impl Render for PrInboxPanel {
                             })))
                             .child(filter_button("role-author", "Mine", self.role == RoleFilter::Author).on_click(cx.listener(|this, _, _, cx| {
                                 this.role = RoleFilter::Author;
+                                cx.notify();
+                            }))),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_0p5()
+                            .flex_wrap()
+                            .child(Label::new("Sort:").size(LabelSize::Small).color(Color::Muted))
+                            .child(filter_button("sort-changed", "Changed first", self.sort_by == SortBy::ChangedFirst).on_click(cx.listener(|this, _, _, cx| {
+                                this.sort_by = SortBy::ChangedFirst;
+                                cx.notify();
+                            })))
+                            .child(filter_button("sort-updated", "Last updated", self.sort_by == SortBy::Updated).on_click(cx.listener(|this, _, _, cx| {
+                                this.sort_by = SortBy::Updated;
+                                cx.notify();
+                            })))
+                            .child(filter_button("sort-created", "Created", self.sort_by == SortBy::Created).on_click(cx.listener(|this, _, _, cx| {
+                                this.sort_by = SortBy::Created;
                                 cx.notify();
                             }))),
                     )
