@@ -162,6 +162,42 @@ pub fn open_review(workspace: WeakEntity<Workspace>, key: PrKey, window: &mut Wi
         .detach_and_notify_err(error_workspace, window, cx);
 }
 
+/// The XDG autostart entry that starts this Zed at login with `--background`.
+fn autostart_file() -> std::path::PathBuf {
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| paths::home_dir().join(".config"));
+    config
+        .join("autostart")
+        .join(format!("{}.desktop", release_channel::RELEASE_CHANNEL.app_id()))
+}
+
+fn set_start_at_login(enabled: bool) -> Result<()> {
+    let file = autostart_file();
+    if !enabled {
+        if file.exists() {
+            std::fs::remove_file(&file)?;
+        }
+        return Ok(());
+    }
+    let exe = std::env::current_exe()?;
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let entry = [
+        "[Desktop Entry]".to_string(),
+        "Type=Application".to_string(),
+        "Name=Zed (background)".to_string(),
+        "Comment=Watches Bitbucket pull requests".to_string(),
+        format!("Exec=\"{}\" --background", exe.display()),
+        "NoDisplay=true".to_string(),
+        "X-GNOME-Autostart-enabled=true".to_string(),
+    ]
+    .join("\n");
+    std::fs::write(&file, entry + "\n")?;
+    Ok(())
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RoleFilter {
     Both,
@@ -458,6 +494,70 @@ impl Render for PrInboxPanel {
                                 .child(Label::new(if total == 0 { "No open pull requests found yet." } else { "Nothing matches the filter." }).color(Color::Muted)),
                         )
                     }),
+            )
+            .child(self.render_background_controls(cx))
+    }
+}
+
+impl PrInboxPanel {
+    /// Keeping Zed running when its windows close, and starting it at login,
+    /// so notifications arrive without a window open.
+    fn render_background_controls(&self, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        let keep_running = workspace::WorkspaceSettings::get_global(cx)
+            .on_last_window_closed
+            .is_keep_running();
+        let starts_at_login = autostart_file().exists();
+        let colors = cx.theme().colors();
+        h_flex()
+            .p_2()
+            .gap_1()
+            .flex_wrap()
+            .border_t_1()
+            .border_color(colors.border)
+            .child(
+                Button::new("keep-running", "Keep running when closed")
+                    .label_size(LabelSize::Small)
+                    .style(ButtonStyle::Subtle)
+                    .toggle_state(keep_running)
+                    .tooltip(Tooltip::text(
+                        "Closing the last window leaves Zed in the tray, still watching pull requests",
+                    ))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let Some(fs) = this
+                            .workspace
+                            .upgrade()
+                            .map(|w| w.read(cx).app_state().fs.clone())
+                        else {
+                            return;
+                        };
+                        settings::update_settings_file(fs, cx, move |settings, _| {
+                            settings.workspace.on_last_window_closed = Some(if keep_running {
+                                settings::OnLastWindowClosed::PlatformDefault
+                            } else {
+                                settings::OnLastWindowClosed::KeepRunning
+                            });
+                        });
+                    })),
+            )
+            .child(
+                Button::new("start-at-login", "Start at login")
+                    .label_size(LabelSize::Small)
+                    .style(ButtonStyle::Subtle)
+                    .toggle_state(starts_at_login)
+                    .disabled(!keep_running && !starts_at_login)
+                    .tooltip(Tooltip::text(if keep_running {
+                        "Start Zed without a window when you log in"
+                    } else {
+                        "Needs Keep running when closed"
+                    }))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Err(e) = set_start_at_login(!starts_at_login) {
+                            this.workspace
+                                .update(cx, |workspace, cx| workspace.show_error(e, cx))
+                                .ok();
+                        }
+                        cx.notify();
+                    })),
             )
     }
 }

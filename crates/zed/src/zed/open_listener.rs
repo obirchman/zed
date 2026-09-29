@@ -430,6 +430,31 @@ pub fn listen_for_cli_connections(opener: OpenListener) -> Result<()> {
     Ok(())
 }
 
+/// Hand `paths_or_urls` to the Zed already listening on the socket, or ask
+/// it for a window with `zed://open` when there are none.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub fn forward_to_running_instance(paths_or_urls: &[String]) -> Result<()> {
+    use release_channel::RELEASE_CHANNEL_NAME;
+    use std::os::unix::net::UnixDatagram;
+
+    let sock_path = paths::data_dir().join(format!("zed-{}.sock", *RELEASE_CHANNEL_NAME));
+    let socket = UnixDatagram::unbound()?;
+    socket.connect(&sock_path)?;
+    if paths_or_urls.is_empty() {
+        socket.send(b"zed://open")?;
+    }
+    for item in paths_or_urls {
+        let url = if item.contains("://") {
+            item.clone()
+        } else {
+            let path = std::path::absolute(item)?;
+            format!("file://{}", path.display())
+        };
+        socket.send(url.as_bytes())?;
+    }
+    Ok(())
+}
+
 fn connect_to_cli(
     server_name: &str,
 ) -> Result<(

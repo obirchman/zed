@@ -160,7 +160,6 @@ pub fn init(app_state: Arc<AppState>, cx: &mut App) {
     cx.observe_global::<SettingsStore>(sync).detach();
 
     if let Some(watch) = PrWatch::try_global(cx) {
-        let handle = handle.clone();
         cx.observe(&watch, move |watch, cx| {
             let changed = watch.read(cx).changed_count();
             if let Some(handle) = handle.borrow().as_ref() {

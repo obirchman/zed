@@ -359,8 +359,12 @@ fn main() {
 
     let (open_listener, mut open_rx) = OpenListener::new();
 
+    // Dev builds on Linux check too: a Zed kept running in the background
+    // must be the one instance, and the socket is per data directory, so
+    // instances with different --user-data-dir still run side by side.
     let failed_single_instance_check = if *zed_env_vars::ZED_STATELESS
-        || *release_channel::RELEASE_CHANNEL == ReleaseChannel::Dev
+        || (*release_channel::RELEASE_CHANNEL == ReleaseChannel::Dev
+            && !cfg!(any(target_os = "linux", target_os = "freebsd")))
     {
         false
     } else {
@@ -381,6 +385,11 @@ fn main() {
         }
     };
     if failed_single_instance_check {
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if let Err(e) = crate::zed::forward_to_running_instance(&args.paths_or_urls) {
+            eprintln!("zed is already running, and handing it the request failed: {e}");
+            return;
+        }
         println!("zed is already running");
         return;
     }
@@ -945,6 +954,13 @@ fn main() {
             }),
             Some(request) => {
                 handle_open_request(request, app_state.clone(), cx);
+                Task::ready(())
+            }
+            None if args.background
+                && WorkspaceSettings::get_global(cx)
+                    .on_last_window_closed
+                    .is_keep_running() =>
+            {
                 Task::ready(())
             }
             None => cx.spawn({
@@ -1749,6 +1765,12 @@ struct Args {
     /// clipboard`
     #[arg(long)]
     system_specs: bool,
+
+    /// Start without opening a window, for starting at login. Takes effect
+    /// only with `on_last_window_closed` set to `keep_running`, where the
+    /// tray icon opens a window.
+    #[arg(long)]
+    background: bool,
 
     /// Used for recording minidumps on crashes by having Zed run a separate
     /// process communicating over a socket.
