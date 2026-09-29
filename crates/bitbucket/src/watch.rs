@@ -7,7 +7,7 @@
 
 use crate::persistence::BitbucketDb;
 use crate::settings::BitbucketSettings;
-use crate::store::{BitbucketStore, PrKey};
+use crate::store::{BitbucketStore, PrKey, StoreEvent};
 use anyhow::{Context as _, Result};
 use crate::changes::{self, Change, Snapshot};
 use crate::models::{self, Account, BuildStatus, Comment, PullRequest};
@@ -74,6 +74,7 @@ pub struct PrWatch {
     last_checked: Option<SystemTime>,
     error: Option<String>,
     _poll: Task<()>,
+    _store_subscription: gpui::Subscription,
 }
 
 impl EventEmitter<WatchEvent> for PrWatch {}
@@ -130,8 +131,15 @@ impl PrWatch {
                 cx.background_executor().timer(interval).await;
             }
         });
+        let store = BitbucketStore::global(cx);
+        let store_subscription = cx.subscribe(&store, |this: &mut Self, store, event, cx| {
+            if *event == StoreEvent::ConnectionChanged && store.read(cx).is_connected() {
+                this.check_now(cx);
+            }
+        });
         Self {
-            store: BitbucketStore::global(cx),
+            store,
+            _store_subscription: store_subscription,
             prs: Vec::new(),
             handled,
             repo_pushes: HashMap::default(),

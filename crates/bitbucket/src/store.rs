@@ -362,7 +362,7 @@ impl BitbucketStore {
             Ok(read) => read,
             Err(e) => return Task::ready(Err(e)),
         };
-        cx.background_spawn(async move { Ok(read.step_log(&repo, &pipeline_uuid, &step_uuid).await?) })
+        cx.background_spawn(async move { read.step_log(&repo, &pipeline_uuid, &step_uuid).await })
     }
 
     /// Send a write planned by `api::plan`, then refetch the pull request it

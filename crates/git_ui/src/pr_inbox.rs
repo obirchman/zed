@@ -4,7 +4,7 @@
 
 use crate::pr_review::PrReview;
 use anyhow::Result;
-use bitbucket::{BitbucketSettings, PrKey, PrWatch, WatchEvent, WatchedPr, find_local_clone};
+use bitbucket::{BitbucketSettings, BitbucketStore, Connection, PrKey, PrWatch, WatchEvent, WatchedPr, find_local_clone};
 use bitbucket::models::ParticipantState;
 use editor::Editor;
 use gpui::{
@@ -207,6 +207,11 @@ enum RoleFilter {
 
 pub struct PrInboxPanel {
     watch: Entity<PrWatch>,
+    store: Entity<BitbucketStore>,
+    email: Entity<Editor>,
+    token: Entity<Editor>,
+    connecting: bool,
+    connect_error: Option<String>,
     workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
     position: DockPosition,
@@ -231,8 +236,21 @@ impl PrInboxPanel {
             editor.set_placeholder_text("Filter by repository, title, author or #id", window, cx);
             editor
         });
+        let store = BitbucketStore::global(cx);
+        let email = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_placeholder_text("Atlassian account email (empty for an access token)", window, cx);
+            editor
+        });
+        let token = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_placeholder_text("API token", window, cx);
+            editor.set_masked(true, cx);
+            editor
+        });
         let subscriptions = vec![
             cx.observe(&watch, |_, _, cx| cx.notify()),
+            cx.observe(&store, |_, _, cx| cx.notify()),
             cx.subscribe(&search, |_, _, event: &editor::EditorEvent, cx| {
                 if matches!(event, editor::EditorEvent::BufferEdited) {
                     cx.notify();
@@ -241,6 +259,11 @@ impl PrInboxPanel {
         ];
         Self {
             watch,
+            store,
+            email,
+            token,
+            connecting: false,
+            connect_error: None,
             workspace,
             focus_handle: cx.focus_handle(),
             position: DockPosition::Right,
@@ -400,6 +423,25 @@ impl Focusable for PrInboxPanel {
 
 impl Render for PrInboxPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        let connection = self.store.read(cx).connection().clone();
+        if connection != Connection::Connected {
+            let body = match connection {
+                Connection::Loading => div()
+                    .p_3()
+                    .child(Label::new("Reading the saved Bitbucket credential…").color(Color::Muted))
+                    .into_any_element(),
+                _ => self.render_connect(cx),
+            };
+            return v_flex()
+                .key_context("PrInboxPanel")
+                .track_focus(&self.focus_handle)
+                .size_full()
+                .bg(cx.theme().colors().panel_background)
+                .child(body)
+                .child(div().flex_1())
+                .child(self.render_background_controls(cx))
+                .into_any_element();
+        }
         let watch = self.watch.read(cx);
         let status = if watch.is_checking() {
             "Checking…".to_string()
@@ -496,10 +538,87 @@ impl Render for PrInboxPanel {
                     }),
             )
             .child(self.render_background_controls(cx))
+            .into_any_element()
     }
 }
 
 impl PrInboxPanel {
+    fn connect(&mut self, cx: &mut gpui::Context<Self>) {
+        let email = self.email.read(cx).text(cx);
+        let token = self.token.read(cx).text(cx);
+        if token.trim().is_empty() {
+            self.connect_error = Some("Enter an API token".into());
+            cx.notify();
+            return;
+        }
+        self.connecting = true;
+        self.connect_error = None;
+        let connect = self
+            .store
+            .update(cx, |store, cx| store.connect(email, token.trim().to_string(), cx));
+        cx.spawn(async move |this, cx| {
+            let result = connect.await;
+            this.update(cx, |this, cx| {
+                this.connecting = false;
+                this.connect_error = result.err().map(|e| format!("{e:#}"));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Shown until a credential is saved: where to get a token and the form
+    /// that checks and saves it.
+    fn render_connect(&self, cx: &mut gpui::Context<Self>) -> AnyElement {
+        let colors = cx.theme().colors();
+        let field = |editor: Entity<Editor>| {
+            div()
+                .px_1()
+                .py_0p5()
+                .border_1()
+                .border_color(colors.border)
+                .rounded_sm()
+                .child(editor)
+        };
+        v_flex()
+            .p_3()
+            .gap_2()
+            .child(Headline::new("Connect Bitbucket").size(HeadlineSize::Small))
+            .child(
+                Label::new(
+                    "Create an API token at id.atlassian.com → Security → API tokens → Create API token with scopes, app Bitbucket. Scopes: read:user, read:workspace, read:repository, read:pullrequest, read:pipeline, write:pullrequest, write:pipeline.",
+                )
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+            )
+            .child(field(self.email.clone()))
+            .child(field(self.token.clone()))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("connect-bitbucket", if self.connecting { "Checking…" } else { "Test and save" })
+                            .style(ButtonStyle::Filled)
+                            .disabled(self.connecting)
+                            .on_click(cx.listener(|this, _, _, cx| this.connect(cx))),
+                    )
+                    .child(
+                        Label::new("Saved in Zed's credentials store")
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    ),
+            )
+            .when_some(
+                self.connect_error
+                    .clone()
+                    .or_else(|| self.store.read(cx).connection_error().map(str::to_string)),
+                |col, error| col.child(Label::new(error).size(LabelSize::Small).color(Color::Error)),
+            )
+            .into_any_element()
+    }
+
     /// Keeping Zed running when its windows close, and starting it at login,
     /// so notifications arrive without a window open.
     fn render_background_controls(&self, cx: &mut gpui::Context<Self>) -> impl IntoElement {
@@ -507,6 +626,12 @@ impl PrInboxPanel {
             .on_last_window_closed
             .is_keep_running();
         let starts_at_login = autostart_file().exists();
+        let account = self
+            .store
+            .read(cx)
+            .me()
+            .map(|me| me.display_name.clone())
+            .filter(|_| self.store.read(cx).is_connected());
         let colors = cx.theme().colors();
         h_flex()
             .p_2()
@@ -514,6 +639,19 @@ impl PrInboxPanel {
             .flex_wrap()
             .border_t_1()
             .border_color(colors.border)
+            .when_some(account, |row, name| {
+                row.child(Label::new(format!("Bitbucket: {name}")).size(LabelSize::Small).color(Color::Muted))
+                    .child(
+                        Button::new("disconnect-bitbucket", "Disconnect")
+                            .label_size(LabelSize::Small)
+                            .style(ButtonStyle::Subtle)
+                            .tooltip(Tooltip::text("Forget the saved Bitbucket credential"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.store.update(cx, |store, cx| store.disconnect(cx)).detach_and_log_err(cx);
+                            })),
+                    )
+                    .child(div().w_2())
+            })
             .child(
                 Button::new("keep-running", "Keep running when closed")
                     .label_size(LabelSize::Small)
