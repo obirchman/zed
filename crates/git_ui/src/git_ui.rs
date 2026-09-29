@@ -66,6 +66,7 @@ pub use conflict_view::MergeConflictIndicator;
 pub fn init(cx: &mut App) {
     bitbucket::init(cx);
     pr_inbox::init(cx);
+    pr_review::init(cx);
     editor::set_blame_renderer(blame_ui::GitBlameRenderer, cx);
     commit_view::init(cx);
     git_graph::init(cx);
