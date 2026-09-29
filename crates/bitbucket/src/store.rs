@@ -397,6 +397,31 @@ impl BitbucketStore {
         cx.background_spawn(async move { read.step_log(&repo, &pipeline_uuid, &step_uuid).await })
     }
 
+    /// What the create form needs: main branch, whether `source` is pushed,
+    /// default reviewers and workspace members.
+    pub fn create_context(&self, repo: RepoRef, source: String, cx: &mut Context<Self>) -> Task<Result<crate::create::CreateContext>> {
+        let client = match self.client() {
+            Ok(client) => client,
+            Err(e) => return Task::ready(Err(e)),
+        };
+        cx.background_spawn(async move { crate::create::load_context(&client, &repo, &source).await })
+    }
+
+    /// Create a pull request, or find the one already open between the same
+    /// branches; the flag says whether it was created now.
+    pub fn create_pull_request(
+        &self,
+        repo: RepoRef,
+        pr: crate::api::NewPullRequest,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(PullRequest, bool)>> {
+        let client = match self.client() {
+            Ok(client) => client,
+            Err(e) => return Task::ready(Err(e)),
+        };
+        cx.background_spawn(async move { crate::create::create(&client, &repo, pr).await })
+    }
+
     /// Send a write planned by `api::plan`, then refetch the pull request it
     /// changed, if any.
     pub fn execute(&mut self, request: WriteRequest, refresh: Option<PrKey>, cx: &mut Context<Self>) -> Task<Result<Value>> {

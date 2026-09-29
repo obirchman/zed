@@ -48,6 +48,7 @@ pub mod git_picker;
 mod git_runtime_diagnostics;
 pub mod multi_diff_view;
 pub mod picker_prompt;
+pub mod pr_create;
 pub mod pr_inbox;
 pub mod pr_pipelines;
 pub mod pr_review;
@@ -191,6 +192,11 @@ pub fn init(cx: &mut App) {
         if !project.is_via_collab() {
             workspace.register_action(
                 |workspace, _: &zed_actions::git::CreatePullRequest, window, cx| {
+                    // Bitbucket pull requests are created in Zed; other hosts open the browser.
+                    if pr_create::active_repository_is_on_bitbucket(workspace, cx) {
+                        pr_create::CreatePrModal::open(workspace, window, cx);
+                        return;
+                    }
                     if let Some(panel) = workspace.panel::<git_panel::GitPanel>(cx) {
                         panel.update(cx, |panel, cx| {
                             panel.create_pull_request(window, cx);

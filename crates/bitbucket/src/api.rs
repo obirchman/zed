@@ -310,6 +310,47 @@ impl Client {
         .await
     }
 
+    pub async fn repository(&self, repo: &RepoRef) -> Result<Value> {
+        self.get_json(&repo_path(repo)).await
+    }
+
+    /// The branch named `name`, or `None` if the repository has no such branch.
+    pub async fn branch(&self, repo: &RepoRef, name: &str) -> Result<Option<Value>> {
+        let q = enc(&format!("name={}", bbql_str(name)));
+        let rows = self
+            .get_all(&format!("{}/refs/branches?q={q}&pagelen=10", repo_path(repo)), None)
+            .await?;
+        Ok(rows.into_iter().find(|b| b["name"].as_str() == Some(name)))
+    }
+
+    /// Open pull requests from branch `source` into branch `destination`.
+    pub async fn open_pull_requests_between(&self, repo: &RepoRef, source: &str, destination: &str) -> Result<Vec<Value>> {
+        let q = format!(
+            "source.branch.name={} AND destination.branch.name={} AND state=\"OPEN\"",
+            bbql_str(source),
+            bbql_str(destination)
+        );
+        self.get_all(&format!("{}/pullrequests?pagelen=50&q={}", repo_path(repo), enc(&q)), None)
+            .await
+    }
+
+    /// Accounts in `workspace`.
+    pub async fn workspace_members(&self, workspace: &str) -> Result<Vec<Value>> {
+        let rows = self
+            .get_all(&format!("/workspaces/{}/members?pagelen=100", enc(workspace)), None)
+            .await?;
+        Ok(rows.into_iter().map(|mut r| r["user"].take()).collect())
+    }
+
+    /// The reviewers Bitbucket adds to every new pull request of `repo`,
+    /// from the repository and its project.
+    pub async fn default_reviewers(&self, repo: &RepoRef) -> Result<Vec<Value>> {
+        let rows = self
+            .get_all(&format!("{}/effective-default-reviewers?pagelen=100", repo_path(repo)), None)
+            .await?;
+        Ok(rows.into_iter().map(|mut r| r["user"].take()).collect())
+    }
+
     /// Pipelines whose target is `branch`, newest first.
     pub async fn branch_pipelines(&self, repo: &RepoRef, branch: &str, limit: Option<usize>) -> Result<Vec<Value>> {
         let pagelen = limit.unwrap_or(30).clamp(1, 100);
@@ -453,6 +494,18 @@ pub struct NewComment {
 }
 
 #[derive(Debug, Clone)]
+pub struct NewPullRequest {
+    pub title: String,
+    pub description: String,
+    pub source_branch: String,
+    pub destination_branch: String,
+    pub close_source_branch: bool,
+    pub draft: bool,
+    /// Account UUIDs (`{...}`).
+    pub reviewers: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct NewPipeline {
     pub branch: String,
     /// Run on this commit instead of the branch head.
@@ -507,6 +560,25 @@ pub mod plan {
             method: if requested { Method::Post } else { Method::Delete },
             path: format!("{}/pullrequests/{pr_id}/request-changes", repo_path(repo)),
             body: None,
+        }
+    }
+
+    pub fn create_pull_request(repo: &RepoRef, pr: &NewPullRequest) -> WriteRequest {
+        let mut body = json!({
+            "title": pr.title,
+            "description": pr.description,
+            "source": { "branch": { "name": pr.source_branch } },
+            "destination": { "branch": { "name": pr.destination_branch } },
+            "close_source_branch": pr.close_source_branch,
+            "reviewers": pr.reviewers.iter().map(|uuid| json!({ "uuid": uuid })).collect::<Vec<_>>(),
+        });
+        if pr.draft {
+            body["draft"] = json!(true);
+        }
+        WriteRequest {
+            method: Method::Post,
+            path: format!("{}/pullrequests", repo_path(repo)),
+            body: Some(body),
         }
     }
 
@@ -593,6 +665,28 @@ mod tests {
             },
         );
         assert_eq!(reply.body.unwrap()["parent"], json!({ "id": 99 }));
+    }
+
+    #[test]
+    fn create_pull_request_body() {
+        let req = plan::create_pull_request(
+            &repo(),
+            &NewPullRequest {
+                title: "Add x".into(),
+                description: "why".into(),
+                source_branch: "feature/x".into(),
+                destination_branch: "main".into(),
+                close_source_branch: true,
+                draft: false,
+                reviewers: vec!["{u}".into()],
+            },
+        );
+        assert_eq!((req.method, req.path.as_str()), (Method::Post, "/repositories/ws/repo/pullrequests"));
+        let body = req.body.unwrap();
+        assert_eq!(body["source"]["branch"]["name"], "feature/x");
+        assert_eq!(body["destination"]["branch"]["name"], "main");
+        assert_eq!(body["reviewers"], json!([{ "uuid": "{u}" }]));
+        assert!(body.get("draft").is_none());
     }
 
     #[test]

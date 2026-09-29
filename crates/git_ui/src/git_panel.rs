@@ -6993,6 +6993,23 @@ impl GitPanel {
                                 }),
                         )
                         .child(
+                            Button::new("create-pull-request", "Create PR")
+                                .label_size(LabelSize::Small)
+                                .tooltip(|_window, cx| {
+                                    Tooltip::for_action(
+                                        "Create a pull request from the current branch",
+                                        &zed_actions::git::CreatePullRequest,
+                                        cx,
+                                    )
+                                })
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(
+                                        zed_actions::git::CreatePullRequest.boxed_clone(),
+                                        cx,
+                                    )
+                                }),
+                        )
+                        .child(
                             Button::new("review-pull-request", "Review PR")
                                 .label_size(LabelSize::Small)
                                 .start_icon(Icon::new(IconName::PullRequest).size(IconSize::Small))
