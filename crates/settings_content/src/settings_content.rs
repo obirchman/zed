@@ -270,6 +270,9 @@ pub struct SettingsContent {
 
     pub language_models: Option<AllLanguageModelSettingsContent>,
 
+    /// Bitbucket Cloud: the pull requests panel and its notifications.
+    pub bitbucket: Option<BitbucketSettingsContent>,
+
     pub outline_panel: Option<OutlinePanelSettingsContent>,
 
     pub project_panel: Option<ProjectPanelSettingsContent>,
@@ -403,7 +406,7 @@ fallible_options::flattened_deserialize!(SettingsContent {
     sections: { project, theme, extension, workspace, editor, remote },
     options: {
         call_hierarchy, command_palette, file_finder, git_panel, tabs, tab_bar, status_bar, preview_tabs, agent,
-        agent_servers, audio, auto_update, base_keymap, collaboration_panel, debugger, diagnostics,
+        agent_servers, audio, auto_update, base_keymap, bitbucket, collaboration_panel, debugger, diagnostics,
         git,
         global_lsp_settings, image_viewer, markdown_preview, repl, helix_mode, hide_mouse,
         journal, log, line_indicator_format, language_models, outline_panel, project_panel,
@@ -1167,6 +1170,29 @@ pub enum HourFormat {
     #[default]
     Hour12,
     Hour24,
+}
+
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct BitbucketSettingsContent {
+    /// Workspaces searched for pull requests you authored or review.
+    ///
+    /// Default: ["lundinova", "cluf200", "lundinova-phoenix"]
+    pub workspaces: Option<Vec<String>>,
+    /// Seconds between checks of the watched pull requests.
+    ///
+    /// Default: 180
+    pub poll_interval_seconds: Option<u64>,
+    /// Minutes between searches of every repository for pull requests you
+    /// review. Between them, only repositories with a new push or one of your
+    /// pull requests are searched.
+    ///
+    /// Default: 60
+    pub full_scan_minutes: Option<u64>,
+    /// Show a desktop notification when a handled pull request changes.
+    ///
+    /// Default: true
+    pub notifications: Option<bool>,
 }
 
 #[with_fallible_options]

@@ -2274,11 +2274,14 @@ dependencies = [
  "anyhow",
  "bbt",
  "collections",
+ "db",
  "futures 0.3.34",
  "gpui",
  "http_client",
  "log",
+ "parking_lot",
  "serde_json",
+ "settings",
 ]
 
 [[package]]

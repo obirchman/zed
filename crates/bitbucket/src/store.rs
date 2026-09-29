@@ -74,6 +74,11 @@ impl BitbucketStore {
         cx.global::<GlobalBitbucketStore>().0.clone()
     }
 
+    /// Make `store` the one `global` returns, for a store built with `with_http`.
+    pub fn set_global(store: Entity<Self>, cx: &mut App) {
+        cx.set_global(GlobalBitbucketStore(store));
+    }
+
     pub fn try_global(cx: &App) -> Option<Entity<Self>> {
         cx.try_global::<GlobalBitbucketStore>().map(|g| g.0.clone())
     }
@@ -185,7 +190,7 @@ impl BitbucketStore {
         self.me.as_ref()
     }
 
-    fn reader(&self) -> Result<Arc<ReadClient>> {
+    pub(crate) fn read_client(&self) -> Result<Arc<ReadClient>> {
         self.read
             .clone()
             .ok_or_else(|| anyhow!(self.config_error.clone().unwrap_or_else(|| "no Bitbucket credential".into())))
@@ -199,7 +204,7 @@ impl BitbucketStore {
     /// Open pull requests of `repo`, newest update first. Not cached: a picker
     /// asks once per opening.
     pub fn open_pull_requests(&self, repo: RepoRef, cx: &mut Context<Self>) -> Task<Result<Vec<PullRequest>>> {
-        let read = match self.reader() {
+        let read = match self.read_client() {
             Ok(read) => read,
             Err(e) => return Task::ready(Err(e)),
         };
@@ -222,7 +227,7 @@ impl BitbucketStore {
     /// emit `PrUpdated` when they arrive. A fetch already running for `key` is
     /// not started twice.
     pub fn refresh_pull_request(&mut self, key: PrKey, cx: &mut Context<Self>) {
-        let read = match self.reader() {
+        let read = match self.read_client() {
             Ok(read) => read,
             Err(e) => {
                 self.pull_requests.entry(key.clone()).or_default().error = Some(format!("{e:#}"));
@@ -279,7 +284,7 @@ impl BitbucketStore {
     }
 
     pub fn refresh_pipelines(&mut self, key: PipelineKey, cx: &mut Context<Self>) -> Task<Result<()>> {
-        let read = match self.reader() {
+        let read = match self.read_client() {
             Ok(read) => read,
             Err(e) => return Task::ready(Err(e)),
         };
@@ -305,7 +310,7 @@ impl BitbucketStore {
     }
 
     pub fn refresh_steps(&mut self, repo: RepoRef, pipeline_uuid: String, cx: &mut Context<Self>) -> Task<Result<()>> {
-        let read = match self.reader() {
+        let read = match self.read_client() {
             Ok(read) => read,
             Err(e) => return Task::ready(Err(e)),
         };
@@ -326,7 +331,7 @@ impl BitbucketStore {
 
     /// One step's log text. Not cached: a running step's log grows.
     pub fn step_log(&self, repo: RepoRef, pipeline_uuid: String, step_uuid: String, cx: &mut Context<Self>) -> Task<Result<String>> {
-        let read = match self.reader() {
+        let read = match self.read_client() {
             Ok(read) => read,
             Err(e) => return Task::ready(Err(e)),
         };
