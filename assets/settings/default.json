@@ -445,8 +445,11 @@
   // What to do when go to definition yields no results.
   //
   // 1. Do nothing: `none`
-  // 2. Find references for the same symbol: `find_all_references` (default)
-  "go_to_definition_fallback": "find_all_references",
+  // 2. Find references for the same symbol: `find_all_references`
+  // 3. Look the name up in the project's symbols, parsed with tree-sitter,
+  //    and find references by searching for the name: `symbol_search`
+  //    (default). Works without a language server or build setup.
+  "go_to_definition_fallback": "symbol_search",
   // How to scroll the target into view when navigating to a definition or reference
   // (e.g. Go to Definition, Go to Type Definition, Find All References).
   //

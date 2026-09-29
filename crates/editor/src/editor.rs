@@ -29,6 +29,7 @@ mod folding_ranges;
 mod git;
 mod highlight_matching_bracket;
 pub mod hover_links;
+mod search_navigation;
 pub mod hover_popover;
 mod indent_guides;
 mod inlays;
@@ -11919,6 +11920,16 @@ impl SemanticsProvider for WeakEntity<Project> {
         kind: GotoDefinitionKind,
         cx: &mut App,
     ) -> Option<Task<Result<Option<Vec<LocationLink>>>>> {
+        if kind == GotoDefinitionKind::Symbol {
+            let project = self.upgrade()?;
+            let lsp = project.update(cx, |project, cx| project.definitions(buffer, position, cx));
+            let buffer = buffer.clone();
+            return Some(search_navigation::or_by_name(
+                Some(lsp),
+                move |cx| search_navigation::definitions_by_name(&project, &buffer, position, cx),
+                cx,
+            ));
+        }
         self.update(cx, |project, cx| match kind {
             GotoDefinitionKind::Symbol => project.definitions(buffer, position, cx),
             GotoDefinitionKind::Declaration => project.declarations(buffer, position, cx),

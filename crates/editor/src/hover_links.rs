@@ -446,6 +446,8 @@ impl Editor {
                 .flatten();
             if let Some(focus_handle) = focus_handle {
                 cx.update(|window, cx| {
+                    // A click that found no definition by name does not search
+                    // for the word; that is for Find All References itself.
                     if EditorSettings::get_global(cx).go_to_definition_fallback
                         == GoToDefinitionFallback::FindAllReferences
                     {

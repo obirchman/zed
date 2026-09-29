@@ -1051,7 +1051,7 @@ impl Editor {
             }
             match fallback_strategy {
                 GoToDefinitionFallback::None => Ok(Navigated::No),
-                GoToDefinitionFallback::FindAllReferences => {
+                GoToDefinitionFallback::FindAllReferences | GoToDefinitionFallback::SymbolSearch => {
                     match editor.update_in(cx, |editor, window, cx| {
                         editor.find_all_references(&FindAllReferences::default(), window, cx)
                     })? {
@@ -1224,8 +1224,15 @@ impl Editor {
         let (buffer, text_head) = multi_buffer.text_anchor_for_position(head, cx)?;
         let workspace = self.workspace()?;
         let project = workspace.read(cx).project().clone();
-        let references =
-            project.update(cx, |project, cx| project.references(&buffer, text_head, cx));
+        let references = {
+            let lsp = project.update(cx, |project, cx| project.references(&buffer, text_head, cx));
+            let (project, buffer) = (project.clone(), buffer.clone());
+            crate::search_navigation::or_by_name(
+                Some(lsp),
+                move |cx| crate::search_navigation::references_by_name(&project, &buffer, text_head, cx),
+                cx,
+            )
+        };
         Some(cx.spawn_in(window, async move |editor, cx| -> Result<()> {
             let Some(locations) = references.await? else {
                 return Ok(());
@@ -1360,7 +1367,15 @@ impl Editor {
             .head();
 
         let (buffer, head) = multi_buffer.text_anchor_for_position(head, cx)?;
-        let references = project.update(cx, |project, cx| project.references(&buffer, head, cx));
+        let references = {
+            let lsp = project.update(cx, |project, cx| project.references(&buffer, head, cx));
+            let (project, buffer) = (project.clone(), buffer.clone());
+            crate::search_navigation::or_by_name(
+                Some(lsp),
+                move |cx| crate::search_navigation::references_by_name(&project, &buffer, head, cx),
+                cx,
+            )
+        };
         // Keep every reference, including the one under the cursor, to match the
         // default `find_all_references` multibuffer (`always_open_multibuffer`).
         Some(cx.spawn(async move |_, _| Ok(references.await?.unwrap_or_default())))
@@ -1407,7 +1422,15 @@ impl Editor {
         let (buffer, head) = multi_buffer.text_anchor_for_position(head, cx)?;
         let workspace = self.workspace()?;
         let project = workspace.read(cx).project().clone();
-        let references = project.update(cx, |project, cx| project.references(&buffer, head, cx));
+        let references = {
+            let lsp = project.update(cx, |project, cx| project.references(&buffer, head, cx));
+            let (project, buffer) = (project.clone(), buffer.clone());
+            crate::search_navigation::or_by_name(
+                Some(lsp),
+                move |cx| crate::search_navigation::references_by_name(&project, &buffer, head, cx),
+                cx,
+            )
+        };
         Some(cx.spawn_in(window, async move |editor, cx| {
             let _cleanup = cx.on_drop(&editor, move |editor, _| {
                 if let Ok(i) = editor

@@ -887,6 +887,10 @@ pub enum GoToDefinitionFallback {
     /// Looks up references of the same symbol instead.
     #[default]
     FindAllReferences,
+    /// Looks the name up in an index of the project's symbols, built from
+    /// the tree-sitter outline of every file, and finds references by
+    /// searching for the name: code navigation that needs no language server.
+    SymbolSearch,
 }
 
 /// Where to show LSP results that can contain multiple locations.
