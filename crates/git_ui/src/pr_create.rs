@@ -48,8 +48,6 @@ pub struct CreatePrModal {
     /// Branches to pick the source from: local ones, then ones only on origin.
     branches: Vec<SourceBranch>,
     repository: Entity<Repository>,
-    /// The branch checked out when the form opened; Zed's Push pushes it.
-    checked_out: String,
     pushing: bool,
     /// The title and description last filled in automatically; a field
     /// still holding its automatic text is refilled when the source changes.
@@ -145,7 +143,6 @@ impl CreatePrModal {
             editor
         });
         window.focus(&title.focus_handle(cx), cx);
-        let checked_out_branch = source.clone();
         let mut this = Self {
             repo,
             repo_root,
@@ -154,7 +151,6 @@ impl CreatePrModal {
             local_head,
             branches: Vec::new(),
             repository,
-            checked_out: checked_out_branch,
             pushing: false,
             auto_title: last_subject,
             auto_description: None,
@@ -426,27 +422,15 @@ impl CreatePrModal {
             .into_any_element()
     }
 
-    /// Push the source branch: Zed's Push for the checked-out branch, else
-    /// `git push origin <branch>`; then check Bitbucket again.
+    /// Push the source branch to the branch of the same name on origin, and
+    /// make that its upstream; then check Bitbucket again. The destination is
+    /// named explicitly because the local branch may track another branch
+    /// (one created from origin/main tracks main).
     fn push(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
-        if self.source == self.checked_out {
-            window.dispatch_action(Box::new(git::Push), cx);
-            return;
-        }
         self.pushing = true;
         self.error = None;
         let (root, branch) = (self.repo_root.clone(), self.source.clone());
-        let push = cx.background_spawn(async move {
-            let output = util::command::new_command("git")
-                .current_dir(&root)
-                .args(["push", "origin", &branch])
-                .output()
-                .await?;
-            if !output.status.success() {
-                anyhow::bail!("git push failed: {}", String::from_utf8_lossy(&output.stderr).trim());
-            }
-            anyhow::Ok(())
-        });
+        let push = cx.background_spawn(async move { push_branch(&root, &branch).await });
         cx.spawn_in(window, async move |this, cx| {
             let result = push.await;
             this.update_in(cx, |this, window, cx| {
@@ -485,9 +469,19 @@ impl CreatePrModal {
                 .child(Label::new(text).size(LabelSize::Small).color(color))
                 .when(needs_push, |row| {
                     row.child(
-                        Button::new("push-branch", if self.pushing { "Pushing…" } else { "Push" })
+                        Button::new(
+                            "push-branch",
+                            if self.pushing {
+                                "Pushing…".to_string()
+                            } else {
+                                format!("Push to origin/{}", self.source)
+                            },
+                        )
                             .style(ButtonStyle::Filled)
                             .disabled(self.pushing)
+                            .tooltip(Tooltip::text(
+                                "git push --set-upstream origin <branch>:<branch>; the branch then tracks origin/<branch>",
+                            ))
                             .on_click(cx.listener(|this, _, window, cx| this.push(window, cx))),
                     )
                     .child(
@@ -636,5 +630,58 @@ impl Render for CreatePrModal {
                             .on_click(cx.listener(|this, _, window, cx| this.create(window, cx))),
                     ),
             )
+    }
+}
+
+/// Push local `branch` to the branch of the same name on origin, and make
+/// that its upstream. The destination is explicit: a branch created from
+/// origin/main tracks main, and a plain push would update main.
+async fn push_branch(root: &std::path::Path, branch: &str) -> anyhow::Result<()> {
+    let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+    let output = util::command::new_command("git")
+        .current_dir(root)
+        .args(["push", "--set-upstream", "origin", &refspec])
+        .output()
+        .await?;
+    if !output.status.success() {
+        anyhow::bail!("git push failed: {}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn git(dir: &std::path::Path, args: &[&str]) -> String {
+        let output = smol::block_on(util::command::new_command("git").current_dir(dir).args(args).output()).unwrap();
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn pushes_to_the_same_named_branch_even_when_tracking_main() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (origin, clone) = (tmp.path().join("origin.git"), tmp.path().join("clone"));
+        git(tmp.path(), &["init", "--quiet", "--bare", "-b", "main", origin.to_str().unwrap()]);
+        git(tmp.path(), &["clone", "--quiet", origin.to_str().unwrap(), clone.to_str().unwrap()]);
+        for args in [
+            &["config", "user.email", "t@example.com"][..],
+            &["config", "user.name", "T"],
+            &["commit", "--quiet", "--allow-empty", "-m", "base"],
+            &["push", "--quiet", "origin", "main"],
+            // The case that pushed to main: a branch created from origin/main tracks main.
+            &["switch", "--quiet", "-c", "fix/x", "origin/main"],
+            &["commit", "--quiet", "--allow-empty", "-m", "fix"],
+        ] {
+            git(&clone, args);
+        }
+        let main_before = git(&origin, &["rev-parse", "main"]);
+
+        smol::block_on(push_branch(&clone, "fix/x")).unwrap();
+
+        assert_eq!(git(&origin, &["rev-parse", "main"]), main_before, "main is untouched");
+        assert_eq!(git(&origin, &["rev-parse", "fix/x"]), git(&clone, &["rev-parse", "fix/x"]));
+        assert_eq!(git(&clone, &["rev-parse", "--abbrev-ref", "fix/x@{upstream}"]), "origin/fix/x");
     }
 }
