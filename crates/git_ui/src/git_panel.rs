@@ -1419,6 +1419,12 @@ impl GitPanel {
                             })
                             .ok();
                     }
+                    // A repository with its own diff base lists that diff's files.
+                    GitStoreEvent::DiffBaseChanged(Some(repo_id))
+                        if _git_store.read(cx).repository_diff_base(*repo_id).is_some() =>
+                    {
+                        this.schedule_update(window, cx);
+                    }
                     GitStoreEvent::RepositoryUpdated(_, _, _) => {}
                     GitStoreEvent::JobsUpdated
                     | GitStoreEvent::ConflictsUpdated
@@ -2521,6 +2527,22 @@ impl GitPanel {
                 project_diff.update(cx, |project_diff, cx| project_diff.autoscroll(cx));
                 return None;
             };
+
+            let git_store = self.project.read(cx).git_store().clone();
+            let repo_id = git_repo.read(cx).id;
+            if let Some(base) = git_store.read(cx).repository_diff_base(repo_id).cloned() {
+                let display = git_store.read(cx).display_diff_for_repo(repo_id);
+                let project = self.project.clone();
+                let repository = git_repo.clone();
+                self.workspace
+                    .update(cx, |workspace, cx| {
+                        crate::branch_diff::BranchDiff::deploy_branch_diff_with_base_ref(
+                            workspace, project, repository, base, display, window, cx,
+                        );
+                    })
+                    .ok();
+                return Some(());
+            }
 
             self.workspace
                 .update(cx, |workspace, cx| match target {
@@ -5393,7 +5415,19 @@ impl GitPanel {
 
         self.stash_entries = repo.cached_stash();
 
-        for status_entry in repo.cached_status() {
+        // A repository with its own diff base (a pull request under review)
+        // lists what differs from that base instead of its working changes.
+        let git_store = self.project.read(cx).git_store().read(cx);
+        let statuses: Vec<project::git_store::StatusEntry> = match git_store
+            .repository_diff_base(repo.id)
+            .and(git_store.display_diff_for_repo(repo.id))
+            .and_then(|list| list.read(cx).statuses_by_path())
+        {
+            Some(statuses) => statuses.iter().cloned().collect(),
+            None => repo.cached_status().collect(),
+        };
+
+        for status_entry in statuses {
             self.changes_count += 1;
             let is_conflict = repo.had_conflict_on_last_merge_head_change(&status_entry.repo_path);
             let is_new = status_entry.status.is_created();

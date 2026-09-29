@@ -1216,6 +1216,80 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_repository_diff_base_overrides_the_setting(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/project"),
+            json!({
+                ".git": {},
+                "committed.txt": "head\n",
+            }),
+        )
+        .await;
+        fs.set_head_and_index_for_repo(
+            Path::new(path!("/project/.git")),
+            &[("committed.txt", "head\n".into())],
+        );
+        fs.set_merge_base_content_for_repo(
+            Path::new(path!("/project/.git")),
+            &[("committed.txt", "base\n".into())],
+        );
+
+        let project = Project::test(fs, [Path::new(path!("/project"))], cx).await;
+        project
+            .update(cx, |project, cx| project.git_scans_complete(cx))
+            .await;
+        cx.run_until_parked();
+
+        let (repository_id, project_path) = project.read_with(cx, |project, cx| {
+            let repo = project.active_repository(cx).unwrap();
+            let worktree = project.worktrees(cx).next().unwrap();
+            let path = ProjectPath {
+                worktree_id: worktree.read(cx).id(),
+                path: rel_path("committed.txt").into(),
+            };
+            (repo.read(cx).id, path)
+        });
+        let status = |project: &Entity<Project>, cx: &mut TestAppContext| {
+            project.read_with(cx, |project, cx| {
+                project
+                    .git_store()
+                    .read(cx)
+                    .display_status_for_project_path(&project_path, cx)
+            })
+        };
+        assert_eq!(status(&project, cx), None, "no working changes against HEAD");
+
+        project.update(cx, |project, cx| {
+            project.git_store().update(cx, |git_store, cx| {
+                git_store.set_repository_diff_base(repository_id, Some("origin/main".into()), cx)
+            })
+        });
+        cx.run_until_parked();
+        assert!(
+            status(&project, cx).is_some(),
+            "the file differs from the repository's own base"
+        );
+        project.read_with(cx, |project, cx| {
+            assert_eq!(
+                project.git_store().read(cx).diff_base(),
+                GitDiffBaseSetting::Head,
+                "the global setting is untouched"
+            );
+        });
+
+        project.update(cx, |project, cx| {
+            project.git_store().update(cx, |git_store, cx| {
+                git_store.set_repository_diff_base(repository_id, None, cx)
+            })
+        });
+        cx.run_until_parked();
+        assert_eq!(status(&project, cx), None);
+    }
+
+    #[gpui::test]
     async fn test_update_on_uncommit(cx: &mut TestAppContext) {
         init_test(cx);
 

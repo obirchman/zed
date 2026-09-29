@@ -108,6 +108,10 @@ pub struct GitStore {
     parked_repositories: Vec<ParkedRepository>,
     diff_base: GitDiffBaseSetting,
     display_diffs: HashMap<RepositoryId, DisplayDiff>,
+    /// Repositories diffed against a given commit instead of what `diff_base`
+    /// says, for example a pull request checked out for review against its
+    /// destination commit.
+    repository_diff_bases: HashMap<RepositoryId, SharedString>,
     worktree_ids: HashMap<RepositoryId, HashSet<WorktreeId>>,
     active_repo_id: Option<RepositoryId>,
     #[allow(clippy::type_complexity)]
@@ -1019,6 +1023,7 @@ impl GitStore {
             parked_repositories: Vec::new(),
             diff_base: diff_base_setting,
             display_diffs: HashMap::default(),
+            repository_diff_bases: HashMap::default(),
             worktree_ids: HashMap::default(),
             active_repo_id: None,
             _subscriptions,
@@ -1759,9 +1764,9 @@ impl GitStore {
         cx: &mut Context<Self>,
     ) -> Task<Result<Entity<BufferDiff>>> {
         let mut branch_base = None;
-        if self.diff_base == GitDiffBaseSetting::DefaultBranch
-            && let Some((repo, repo_path)) =
-                self.repository_and_path_for_buffer_id(buffer.read(cx).remote_id(), cx)
+        if let Some((repo, repo_path)) =
+            self.repository_and_path_for_buffer_id(buffer.read(cx).remote_id(), cx)
+            && self.uses_display_diff(repo.read(cx).id)
             && let Some((buffers, _)) = self
                 .display_diffs
                 .get(&repo.read(cx).id)
@@ -2511,6 +2516,7 @@ impl GitStore {
 
                 for repo_id in repos_without_worktree {
                     self.display_diffs.remove(&repo_id);
+                    self.repository_diff_bases.remove(&repo_id);
                     self.repositories.remove(&repo_id);
                     self.worktree_ids.remove(&repo_id);
                     if let Some(updates_tx) =
@@ -2726,6 +2732,7 @@ impl GitStore {
                 cx.emit(GitStoreEvent::ActiveRepositoryChanged(None));
             }
             self.display_diffs.remove(&id);
+            self.repository_diff_bases.remove(&id);
             self.repositories.remove(&id);
             if let Some(updates_tx) = updates_tx.as_ref() {
                 updates_tx
@@ -5070,10 +5077,10 @@ impl GitStore {
 
     pub fn display_repo_snapshots(&self, cx: &App) -> HashMap<RepositoryId, RepositorySnapshot> {
         let mut snapshots = self.repo_snapshots(cx);
-        if self.diff_base == GitDiffBaseSetting::Head {
-            return snapshots;
-        }
         for (id, snapshot) in &mut snapshots {
+            if !self.uses_display_diff(*id) {
+                continue;
+            }
             if let Some(statuses) = self
                 .display_diffs
                 .get(id)
@@ -5095,7 +5102,8 @@ impl GitStore {
             return;
         }
         self.diff_base = setting;
-        self.display_diffs.clear();
+        let overridden = &self.repository_diff_bases;
+        self.display_diffs.retain(|id, _| overridden.contains_key(id));
         if setting == GitDiffBaseSetting::DefaultBranch {
             let repo_ids = self.repositories.keys().copied().collect::<Vec<_>>();
             for repo_id in repo_ids {
@@ -5103,6 +5111,44 @@ impl GitStore {
             }
         }
         cx.emit(GitStoreEvent::DiffBaseChanged(None));
+    }
+
+    /// Whether `repo_id` is shown against a base other than HEAD.
+    fn uses_display_diff(&self, repo_id: RepositoryId) -> bool {
+        self.diff_base == GitDiffBaseSetting::DefaultBranch
+            || self.repository_diff_bases.contains_key(&repo_id)
+    }
+
+    /// Show `repo_id` against `base` (a commit or ref) everywhere changes are
+    /// shown, instead of against HEAD or the default branch; `None` returns it
+    /// to the `diff_base` setting.
+    pub fn set_repository_diff_base(
+        &mut self,
+        repo_id: RepositoryId,
+        base: Option<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        match base {
+            Some(base) => {
+                self.repository_diff_bases.insert(repo_id, base.clone());
+                if let Some(repo) = self.repositories.get(&repo_id).cloned() {
+                    self.ensure_display_diff(repo, base, cx);
+                }
+            }
+            None => {
+                if self.repository_diff_bases.remove(&repo_id).is_none() {
+                    return;
+                }
+                self.display_diffs.remove(&repo_id);
+                self.refresh_diff_base_for_repo(repo_id, cx);
+            }
+        }
+        cx.emit(GitStoreEvent::DiffBaseChanged(Some(repo_id)));
+    }
+
+    /// The base `set_repository_diff_base` gave `repo_id`, if any.
+    pub fn repository_diff_base(&self, repo_id: RepositoryId) -> Option<&SharedString> {
+        self.repository_diff_bases.get(&repo_id)
     }
 
     pub fn display_status_for_buffer_id(
@@ -5129,7 +5175,7 @@ impl GitStore {
         repo_path: &RepoPath,
         cx: &App,
     ) -> Option<FileStatus> {
-        if self.diff_base == GitDiffBaseSetting::DefaultBranch
+        if self.uses_display_diff(repo.read(cx).id)
             && let Some((buffers, _)) = self
                 .display_diffs
                 .get(&repo.read(cx).id)
@@ -5196,6 +5242,12 @@ impl GitStore {
     }
 
     fn refresh_diff_base_for_repo(&mut self, repo_id: RepositoryId, cx: &mut Context<Self>) {
+        if let Some(base) = self.repository_diff_bases.get(&repo_id).cloned() {
+            if let Some(repo) = self.repositories.get(&repo_id).cloned() {
+                self.ensure_display_diff(repo, base, cx);
+            }
+            return;
+        }
         if self.diff_base == GitDiffBaseSetting::Head {
             return;
         }
