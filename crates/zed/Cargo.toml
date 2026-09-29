@@ -63,6 +63,7 @@ path = "src/visual_test_runner.rs"
 required-features = ["visual-tests"]
 
 [dependencies]
+bitbucket.workspace = true
 acp_thread.workspace = true
 acp_tools.workspace = true
 action_log = { workspace = true, optional = true }
@@ -245,6 +246,7 @@ gpui = { workspace = true, features = ["profiler", "windows-manifest"] }
 windows_resources = { path = "../windows_resources" }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+ksni = { version = "0.3", default-features = false, features = ["async-io", "blocking"] }
 gpui = { workspace = true, features = ["profiler", "wayland", "x11"] }
 ashpd.workspace = true
 image.workspace = true

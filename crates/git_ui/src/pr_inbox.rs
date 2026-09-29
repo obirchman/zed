@@ -97,8 +97,22 @@ fn key_from_tag(tag: &str) -> Option<PrKey> {
 }
 
 /// Open the review in the first window that has a workspace, and bring that
-/// window forward. Without any window, `open_without_window` decides.
+/// window forward. Without any window, the hook set by
+/// `set_open_without_window` opens one.
 pub fn open_review_in_any_window(key: PrKey, cx: &mut App) {
+    if open_review_in_existing_window(key.clone(), cx) {
+        return;
+    }
+    OPEN_WITHOUT_WINDOW.with(|hook| {
+        if let Some(hook) = hook.borrow().as_ref() {
+            hook(key, cx);
+        }
+    });
+}
+
+/// Open the review in the first window that has a workspace. False when no
+/// such window is open.
+pub fn open_review_in_existing_window(key: PrKey, cx: &mut App) -> bool {
     for window in cx.windows() {
         let Some(multi_workspace) = window.downcast::<MultiWorkspace>() else {
             continue;
@@ -109,14 +123,10 @@ pub fn open_review_in_any_window(key: PrKey, cx: &mut App) {
             open_review(workspace.downgrade(), key.clone(), window, cx);
         });
         if opened.is_ok() {
-            return;
+            return true;
         }
     }
-    OPEN_WITHOUT_WINDOW.with(|hook| {
-        if let Some(hook) = hook.borrow().as_ref() {
-            hook(key, cx);
-        }
-    });
+    false
 }
 
 thread_local! {

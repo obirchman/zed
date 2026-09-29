@@ -2,6 +2,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod reliability;
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+mod tray;
 mod watcher_debug;
 mod zed;
 
@@ -776,6 +778,8 @@ fn main() {
         notifications::init(app_state.client.clone(), app_state.user_store.clone(), cx);
         collab_ui::init(&app_state, cx);
         git_ui::init(cx);
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        tray::init(app_state.clone(), cx);
         feedback::init(cx);
         markdown_preview::init(cx);
         tabular_data_preview::init(cx);
