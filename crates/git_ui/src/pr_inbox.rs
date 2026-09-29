@@ -222,6 +222,8 @@ pub struct PrInboxPanel {
     changed_only: bool,
     role: RoleFilter,
     sort_by: SortBy,
+    /// Newest first; false sorts oldest first.
+    sort_newest_first: bool,
     search: Entity<Editor>,
     _subscriptions: Vec<Subscription>,
 }
@@ -260,6 +262,7 @@ impl PrInboxPanel {
             changed_only: false,
             role: RoleFilter::Both,
             sort_by: SortBy::ChangedFirst,
+            sort_newest_first: true,
             search,
             _subscriptions: subscriptions,
         }
@@ -291,13 +294,17 @@ impl PrInboxPanel {
             .cloned()
             .collect();
         // Bitbucket's timestamps are ISO 8601, so they sort as text.
+        let newest_first = self.sort_newest_first;
+        let by_time = |a: &Option<String>, b: &Option<String>| {
+            if newest_first { b.cmp(a) } else { a.cmp(b) }
+        };
         match self.sort_by {
             SortBy::ChangedFirst => {
-                rows.sort_by(|a, b| b.pull_request.updated_on.cmp(&a.pull_request.updated_on));
+                rows.sort_by(|a, b| by_time(&a.pull_request.updated_on, &b.pull_request.updated_on));
                 rows.sort_by_key(|p| !p.is_changed());
             }
-            SortBy::Updated => rows.sort_by(|a, b| b.pull_request.updated_on.cmp(&a.pull_request.updated_on)),
-            SortBy::Created => rows.sort_by(|a, b| b.pull_request.created_on.cmp(&a.pull_request.created_on)),
+            SortBy::Updated => rows.sort_by(|a, b| by_time(&a.pull_request.updated_on, &b.pull_request.updated_on)),
+            SortBy::Created => rows.sort_by(|a, b| by_time(&a.pull_request.created_on, &b.pull_request.created_on)),
         }
         rows
     }
@@ -459,6 +466,11 @@ impl Render for PrInboxPanel {
             .map(|(ix, pr)| self.render_row(pr, ix, cx))
             .collect();
         let empty = rows.is_empty();
+        let sort_buttons = [
+            self.sort_button("sort-changed", "Changed first", SortBy::ChangedFirst, cx).into_any_element(),
+            self.sort_button("sort-updated", "Last updated", SortBy::Updated, cx).into_any_element(),
+            self.sort_button("sort-created", "Created", SortBy::Created, cx).into_any_element(),
+        ];
         let colors = cx.theme().colors();
         let filter_button = |id: &'static str, label: &'static str, selected: bool| {
             Button::new(id, label)
@@ -523,18 +535,7 @@ impl Render for PrInboxPanel {
                             .gap_0p5()
                             .flex_wrap()
                             .child(Label::new("Sort:").size(LabelSize::Small).color(Color::Muted))
-                            .child(filter_button("sort-changed", "Changed first", self.sort_by == SortBy::ChangedFirst).on_click(cx.listener(|this, _, _, cx| {
-                                this.sort_by = SortBy::ChangedFirst;
-                                cx.notify();
-                            })))
-                            .child(filter_button("sort-updated", "Last updated", self.sort_by == SortBy::Updated).on_click(cx.listener(|this, _, _, cx| {
-                                this.sort_by = SortBy::Updated;
-                                cx.notify();
-                            })))
-                            .child(filter_button("sort-created", "Created", self.sort_by == SortBy::Created).on_click(cx.listener(|this, _, _, cx| {
-                                this.sort_by = SortBy::Created;
-                                cx.notify();
-                            }))),
+                            .children(sort_buttons),
                     )
                     .child(div().px_1().py_0p5().border_1().border_color(colors.border).rounded_sm().child(self.search.clone()))
                     .when_some(error, |col, error| col.child(Label::new(error).size(LabelSize::Small).color(Color::Error))),
@@ -559,6 +560,37 @@ impl Render for PrInboxPanel {
 }
 
 impl PrInboxPanel {
+    /// A sort choice: clicking it selects it newest first; clicking it again
+    /// flips between newest first and oldest first.
+    fn sort_button(&self, id: &'static str, label: &'static str, sort_by: SortBy, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        let selected = self.sort_by == sort_by;
+        let newest_first = self.sort_newest_first;
+        Button::new(id, label)
+            .label_size(LabelSize::Small)
+            .toggle_state(selected)
+            .style(ButtonStyle::Subtle)
+            .when(selected, |button| {
+                button.end_icon(
+                    Icon::new(if newest_first { IconName::ArrowDown } else { IconName::ArrowUp })
+                        .size(IconSize::XSmall),
+                )
+            })
+            .tooltip(Tooltip::text(match (selected, newest_first) {
+                (true, true) => "Newest first; click for oldest first",
+                (true, false) => "Oldest first; click for newest first",
+                (false, _) => "Sort by this, newest first",
+            }))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if this.sort_by == sort_by {
+                    this.sort_newest_first = !this.sort_newest_first;
+                } else {
+                    this.sort_by = sort_by;
+                    this.sort_newest_first = true;
+                }
+                cx.notify();
+            }))
+    }
+
     /// Shown until an API token is set: where to set it.
     fn render_not_configured(&self, cx: &mut gpui::Context<Self>) -> AnyElement {
         let error = self.store.read(cx).connection_error().map(str::to_string);
