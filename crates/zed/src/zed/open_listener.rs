@@ -430,6 +430,16 @@ pub fn listen_for_cli_connections(opener: OpenListener) -> Result<()> {
     Ok(())
 }
 
+/// Whether another Zed with this data directory is listening on its socket.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub fn running_instance_exists() -> bool {
+    use release_channel::RELEASE_CHANNEL_NAME;
+    use std::os::unix::net::UnixDatagram;
+
+    let sock_path = paths::data_dir().join(format!("zed-{}.sock", *RELEASE_CHANNEL_NAME));
+    UnixDatagram::unbound().is_ok_and(|socket| socket.connect(&sock_path).is_ok())
+}
+
 /// Hand `paths_or_urls` to the Zed already listening on the socket, or ask
 /// it for a window with `zed://open` when there are none.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]

@@ -370,7 +370,17 @@ fn main() {
     } else {
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         {
-            crate::zed::listen_for_cli_connections(open_listener.clone()).is_err()
+            match crate::zed::listen_for_cli_connections(open_listener.clone()) {
+                Ok(()) => false,
+                Err(_) if crate::zed::running_instance_exists() => true,
+                // No other instance, but no socket either (for example a data
+                // directory path longer than a socket path may be): run
+                // without the single-instance check.
+                Err(e) => {
+                    eprintln!("single-instance socket unavailable, continuing without it: {e}");
+                    false
+                }
+            }
         }
 
         #[cfg(target_os = "windows")]
